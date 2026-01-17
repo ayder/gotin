@@ -1,21 +1,27 @@
-# Task 3: The Regex Trigger Engine
+# Task 3: The Trigger Command System
 
 ## Goal
-Make the client react to text.
+Implement in-client commands to creating and managing triggers dynamically.
 
 ## Steps
-1.  **Define Trigger Structure**
-    -   File: `internal/logic/trigger.go`
-    -   Struct `Trigger { Pattern *regexp.Regexp, Response string }`
+1.  **Update Input Handler**
+    -   File: `internal/input/handler.go`
+    -   Add commands:
+        -   `/trigger <pattern> <response>`: Add a new trigger.
+        -   `/untrigger <pattern>`: Remove a trigger.
+        -   `/triggers`: List all active triggers.
 
-2.  **Implement Matcher**
-    -   List of `Triggers`.
-    -   In `ProcessIncoming` (or specifically `HandleLine`), iterate triggers.
-    -   If `Pattern.MatchString(line)`, send `Response` to network.
-
-3.  **Hardcode Test Trigger**
-    -   Add trigger: `Pattern: "Welcome", Response: "Thank you"` (Be careful with loops!).
+3.  **Implement Regex Group Support**
+    -   Update `CheckLine` to use `pattern.FindStringSubmatch`.
+    -   If matches found, perform substitution on the `Response` string (e.g., replace `$1` with first group).
+    -   Use `regexp.Expand` or manual string replacement.
 
 ## Verification
--   Connect to MUD.
--   When trigger word is received, verify client sends response (check logs or server feedback).
+-   Run client.
+-   Type `/trigger ^Greetings (.*) say Hello $1`
+-   Restart client (verify persistence).
+-   Type `/triggers` (should see it).
+-   Connect to server (or mock).
+-   Receive "Greetings Traveler".
+-   Verify client sends "say Hello Traveler".
+-   Type `/untrigger ^Greetings (.*)`, verify it's gone.

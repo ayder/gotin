@@ -59,3 +59,9 @@ func (lb *LineBuffer) Flush() string {
 	lb.buffer.Reset()
 	return line
 }
+
+// GetPending returns the current content of the incomplete line buffer.
+// This allow peeking at data (like prompts) without consuming it.
+func (lb *LineBuffer) GetPending() string {
+	return lb.buffer.String()
+}

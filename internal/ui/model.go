@@ -3,11 +3,12 @@ package ui
 import (
 	"strings"
 
+	"dmud/internal/input"
+
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"dmud/internal/input"
 )
 
 // SetLocalEchoMsg is sent by the network layer to toggle password mode.
@@ -44,7 +45,7 @@ type Model struct {
 	content        []string // stores all lines displayed in viewport
 
 	// Channels for command routing
-	SendChan  chan<- string             // Channel to send commands to server
+	SendChan  chan<- string              // Channel to send commands to server
 	LocalChan chan<- input.CommandResult // Channel for local command actions
 }
 
@@ -107,8 +108,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return m, nil
 				}
-				// Server command - echo input and send expanded text to server via channel
-				m.appendContent(value)
+				// Server command - determine how to echo
+				if m.textinput.EchoMode == textinput.EchoNormal {
+					// Normal input: echo "value\n"
+					// We add the newline so subsequent output starts on a new line
+					m.appendContent(value + "\n")
+				} else {
+					// Password/Masked input: usually we print nothing or just a newline
+					// to simulate the user hitting enter without revealing the password.
+					m.appendContent("\n")
+				}
+
 				m.textinput.Reset()
 				if m.SendChan != nil {
 					// Send the alias-expanded text to server
@@ -194,8 +204,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	// Handle viewport updates
-	m.viewport, cmd = m.viewport.Update(msg)
-	cmds = append(cmds, cmd)
+	// We block KeyMsg because we don't want vim bindings (j/k etc) to scroll
+	// while typing. We only want Mouse and WindowSize for the viewport.
+	switch msg.(type) {
+	case tea.KeyMsg:
+		// Do nothing for keys, textinput handles them
+	default:
+		m.viewport, cmd = m.viewport.Update(msg)
+		cmds = append(cmds, cmd)
+	}
 
 	// Handle text input updates
 	m.textinput, cmd = m.textinput.Update(msg)
@@ -204,17 +221,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// appendContent adds a line to the viewport content.
-// Only auto-scrolls to bottom if the user was already at the bottom.
-func (m *Model) appendContent(line string) {
-	// Check if user is at the bottom before adding content
-	atBottom := m.viewport.AtBottom()
+// appendContent adds incoming text to the viewport content.
+// It handles partial lines by appending to the last line if needed.
+func (m *Model) appendContent(text string) {
+	// Calculate distance from bottom before update
+	// Standard AtBottom() can be strict. We allow a small buffer (1 line)
+	// to account for partial updates or off-by-one rendering issues.
+	distFromBottom := m.viewport.TotalLineCount() - (m.viewport.YOffset + m.viewport.Height)
+	shouldAutoScroll := distFromBottom <= 1
 
-	m.content = append(m.content, line)
+	// Sanitize input: remove all carriage returns (CR / \r)
+	text = strings.ReplaceAll(text, "\r", "")
+
+	// If m.content is empty, start it.
+	if len(m.content) == 0 {
+		m.content = []string{""}
+	}
+
+	parts := strings.Split(text, "\n")
+
+	// Pending part
+	lastIdx := len(m.content) - 1
+	m.content[lastIdx] += parts[0]
+
+	for i := 1; i < len(parts); i++ {
+		m.content = append(m.content, parts[i])
+	}
+
 	m.viewport.SetContent(strings.Join(m.content, "\n"))
 
-	// Only scroll to bottom if user was already there
-	if atBottom {
+	// Auto-scroll if we were near the bottom
+	if shouldAutoScroll {
 		m.viewport.GotoBottom()
 	}
 }

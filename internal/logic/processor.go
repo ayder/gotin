@@ -16,12 +16,15 @@ func NewProcessor(te *TriggerEngine) *Processor {
 // ProcessLine processes a single line of incoming text.
 // It checks triggers and returns the (potentially modified) line for display.
 func (p *Processor) ProcessLine(line string) string {
+	// Strip ANSI codes for trigger matching
+	clean := StripANSI(line)
+
 	// Check triggers for this line
 	if p.triggerEngine != nil {
-		p.triggerEngine.CheckLine(line)
+		p.triggerEngine.CheckLine(clean)
 	}
 
-	// Currently returns line unchanged; future: ANSI processing, gag triggers, etc.
+	// Currently returns line unchanged; future: gag triggers, etc.
 	return line
 }
 

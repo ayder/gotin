@@ -3,6 +3,7 @@ package network
 import (
 	"fmt"
 	"net"
+	"strconv"
 	"time"
 )
 
@@ -11,12 +12,14 @@ import (
 type EchoCallback func(localEcho bool)
 
 // Client wraps a TCP connection to a MUD server.
+// Client wraps a TCP connection to a MUD server.
 type Client struct {
 	conn         net.Conn
 	decoder      *Decoder
 	debug        bool
-	serverEcho   bool         // true when server is handling echo (client should hide input)
-	echoCallback EchoCallback // called when echo state changes
+	serverEcho   bool              // true when server is handling echo (client should hide input)
+	echoCallback EchoCallback      // called when echo state changes
+	dataCallback func(data string) // called when new data arrives
 }
 
 // SetDebug enables or disables debug logging.
@@ -27,6 +30,11 @@ func (c *Client) SetDebug(enabled bool) {
 // SetEchoCallback sets the callback function for echo state changes.
 func (c *Client) SetEchoCallback(callback EchoCallback) {
 	c.echoCallback = callback
+}
+
+// SetDataCallback sets the callback function for incoming data.
+func (c *Client) SetDataCallback(callback func(data string)) {
+	c.dataCallback = callback
 }
 
 // Send writes raw bytes to the connection.
@@ -163,7 +171,7 @@ func (c *Client) ProcessIAC(data []byte) (cleanData []byte, responses []byte) {
 
 // Connect establishes a TCP connection to the specified host and port.
 func Connect(host string, port int) (*Client, error) {
-	addr := fmt.Sprintf("%s:%d", host, port)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to %s: %w", addr, err)
@@ -174,13 +182,14 @@ func Connect(host string, port int) (*Client, error) {
 	}, nil
 }
 
-// ReadLoop continuously reads data from the connection and prints raw bytes to stdout.
+// ReadLoop continuously reads data from the connection.
+// It sends decoded text to the dataCallback if set, or prints to stdout.
 func (c *Client) ReadLoop() {
 	buffer := make([]byte, 1024)
 	for {
 		n, err := c.conn.Read(buffer)
 		if err != nil {
-			fmt.Printf("Read error: %v\n", err)
+			// Signal connection closed? For now just handle error/close
 			return
 		}
 		if n > 0 {
@@ -197,7 +206,11 @@ func (c *Client) ReadLoop() {
 
 			if len(clean) > 0 {
 				text := c.decoder.Decode(clean)
-				fmt.Print(text)
+				if c.dataCallback != nil {
+					c.dataCallback(text)
+				} else {
+					fmt.Print(text)
+				}
 			}
 		}
 	}

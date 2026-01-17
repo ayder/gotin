@@ -47,6 +47,9 @@ func NewHandler() *Handler {
 	h.commands["alias"] = h.cmdAlias
 	h.commands["unalias"] = h.cmdUnalias
 	h.commands["aliases"] = h.cmdAliases
+	h.commands["trigger"] = h.cmdTrigger
+	h.commands["untrigger"] = h.cmdUntrigger
+	h.commands["triggers"] = h.cmdTriggers
 
 	return h
 }
@@ -250,5 +253,70 @@ func (h *Handler) GetAliases() map[string]string {
 func (h *Handler) SetAliases(aliases map[string]string) {
 	for key, value := range aliases {
 		h.aliases.Set(key, value)
+	}
+}
+
+// cmdTrigger handles the /trigger <pattern> <response> command.
+func (h *Handler) cmdTrigger(args []string) CommandResult {
+	if len(args) < 2 {
+		return CommandResult{
+			IsLocal:  true,
+			Handled:  false,
+			Response: "Usage: /trigger <pattern> <response>\nExample: /trigger ^Welcome (.*) say Hello $1",
+		}
+	}
+
+	pattern := args[0]
+	response := strings.Join(args[1:], " ")
+
+	return CommandResult{
+		IsLocal:  true,
+		Handled:  true,
+		Response: "Trigger added: " + pattern + " -> " + response,
+		Action:   "trigger_add",
+		ActionArgs: map[string]string{
+			"pattern":  pattern,
+			"response": response,
+		},
+	}
+}
+
+// cmdUntrigger handles the /untrigger <pattern> command.
+func (h *Handler) cmdUntrigger(args []string) CommandResult {
+	if len(args) < 1 {
+		return CommandResult{
+			IsLocal:  true,
+			Handled:  false,
+			Response: "Usage: /untrigger <pattern>",
+		}
+	}
+
+	pattern := args[0]
+	// If the user provided more args, maybe they meant to type a space-containing pattern?
+	// But patterns usually don't have spaces unless quoted? Telnet doesn't support quotes nicely here.
+	// We'll treat the first word as the pattern for now, or join everything?
+	// Regex patterns can contain spaces. If so, user might type /untrigger ^foo bar.
+	// If we join, it matches how we added.
+	if len(args) > 1 {
+		pattern = strings.Join(args, " ")
+	}
+
+	return CommandResult{
+		IsLocal:  true,
+		Handled:  true,
+		Response: "Trigger removed: " + pattern,
+		Action:   "trigger_remove",
+		ActionArgs: map[string]string{
+			"pattern": pattern,
+		},
+	}
+}
+
+// cmdTriggers handles the /triggers command to list aliases.
+func (h *Handler) cmdTriggers(args []string) CommandResult {
+	return CommandResult{
+		IsLocal: true,
+		Handled: true,
+		Action:  "trigger_list",
 	}
 }

@@ -44,14 +44,41 @@ func (te *TriggerEngine) AddTrigger(pattern string, response string) error {
 func (te *TriggerEngine) CheckLine(line string) []string {
 	var triggered []string
 	for _, t := range te.triggers {
-		if t.Pattern.MatchString(line) {
-			triggered = append(triggered, t.Response)
+		// Find match indices for expansion
+		loc := t.Pattern.FindStringSubmatchIndex(line)
+		if loc != nil {
+			// Expand the response template with captured groups
+			// ExpandString appends to the first arg, so we pass nil to start fresh
+			expanded := t.Pattern.ExpandString(nil, t.Response, line, loc)
+			response := string(expanded)
+
+			triggered = append(triggered, response)
 			if te.sendFunc != nil {
-				te.sendFunc(t.Response)
+				te.sendFunc(response)
 			}
 		}
 	}
 	return triggered
+}
+
+// RemoveTrigger removes a trigger by its exact pattern string.
+func (te *TriggerEngine) RemoveTrigger(pattern string) bool {
+	for i, t := range te.triggers {
+		if t.Pattern.String() == pattern {
+			// Remove element
+			te.triggers = append(te.triggers[:i], te.triggers[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// ListTriggers returns all registered triggers.
+func (te *TriggerEngine) ListTriggers() []Trigger {
+	// Return a copy to avoid mutation
+	list := make([]Trigger, len(te.triggers))
+	copy(list, te.triggers)
+	return list
 }
 
 // TriggerCount returns the number of registered triggers.
