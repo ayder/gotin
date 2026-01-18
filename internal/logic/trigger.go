@@ -1,6 +1,14 @@
 package logic
 
-import "regexp"
+import (
+	"regexp"
+	"sync"
+	"time"
+)
+
+// MinTriggerInterval is the minimum time between consecutive firings of the same trigger.
+// This prevents infinite loops where a trigger's response triggers itself.
+const MinTriggerInterval = 200 * time.Millisecond
 
 // Trigger represents a pattern-response pair.
 // When the Pattern matches incoming text, Response is sent to the server.
@@ -11,16 +19,19 @@ type Trigger struct {
 
 // TriggerEngine manages a list of triggers and checks incoming lines against them.
 type TriggerEngine struct {
-	triggers []Trigger
-	sendFunc func(string) // Callback to send responses to the network
+	triggers     []Trigger
+	sendFunc     func(string) // Callback to send responses to the network
+	lastFired    map[string]time.Time
+	lastFiredMux sync.Mutex
 }
 
 // NewTriggerEngine creates a new TriggerEngine with the given send function.
 // The sendFunc is called whenever a trigger matches and needs to send a response.
 func NewTriggerEngine(sendFunc func(string)) *TriggerEngine {
 	return &TriggerEngine{
-		triggers: make([]Trigger, 0),
-		sendFunc: sendFunc,
+		triggers:  make([]Trigger, 0),
+		sendFunc:  sendFunc,
+		lastFired: make(map[string]time.Time),
 	}
 }
 
@@ -41,9 +52,24 @@ func (te *TriggerEngine) AddTrigger(pattern string, response string) error {
 // CheckLine checks a line against all triggers.
 // If a trigger matches, its response is sent via the sendFunc.
 // Returns a list of responses that were triggered (for logging/testing).
+// Implements loop prevention: each trigger has a minimum 200ms cooldown between firings.
 func (te *TriggerEngine) CheckLine(line string) []string {
 	var triggered []string
+	now := time.Now()
+
 	for _, t := range te.triggers {
+		patternKey := t.Pattern.String()
+
+		// Check cooldown for loop prevention
+		te.lastFiredMux.Lock()
+		lastTime, exists := te.lastFired[patternKey]
+		if exists && now.Sub(lastTime) < MinTriggerInterval {
+			// Trigger is on cooldown, skip it
+			te.lastFiredMux.Unlock()
+			continue
+		}
+		te.lastFiredMux.Unlock()
+
 		// Find match indices for expansion
 		loc := t.Pattern.FindStringSubmatchIndex(line)
 		if loc != nil {
@@ -51,6 +77,11 @@ func (te *TriggerEngine) CheckLine(line string) []string {
 			// ExpandString appends to the first arg, so we pass nil to start fresh
 			expanded := t.Pattern.ExpandString(nil, t.Response, line, loc)
 			response := string(expanded)
+
+			// Update last fired time
+			te.lastFiredMux.Lock()
+			te.lastFired[patternKey] = now
+			te.lastFiredMux.Unlock()
 
 			triggered = append(triggered, response)
 			if te.sendFunc != nil {

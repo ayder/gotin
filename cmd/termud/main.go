@@ -11,6 +11,7 @@ import (
 	"dmud/internal/config"
 	"dmud/internal/input"
 	"dmud/internal/logic"
+	"dmud/internal/mapper"
 	"dmud/internal/network"
 	"dmud/internal/ui"
 
@@ -65,10 +66,9 @@ func main() {
 	// 7. Network State
 	var client *network.Client
 
-	// Shared Logic Components (initialized once)
+	// Shared Logic Components
 	sendToNet := func(msg string) {
 		if client != nil {
-			// Append CRLF as triggers likely don't include it
 			if !strings.HasSuffix(msg, "\r\n") {
 				msg += "\r\n"
 			}
@@ -76,6 +76,8 @@ func main() {
 		}
 	}
 	te := logic.NewTriggerEngine(sendToNet)
+	// Initialize Mapper
+	mapEngine := mapper.NewEngine("") // Path set on create
 
 	// Load triggers from config
 	for _, t := range cfg.Triggers {
@@ -154,6 +156,20 @@ func main() {
 			for _, line := range logicLines {
 				proc.ProcessLine(line) // This checks triggers
 			}
+
+			// Smart auto-mapping: process room data when we have a pending movement
+			if mapEngine.HasPendingMovement() {
+				processed, roomName, loopDetected, err := mapEngine.ProcessRoomData(data)
+				if processed {
+					if err != nil {
+						p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("[Map] Error: %v\n", err)})
+					} else if loopDetected {
+						p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("[Map] Loop detected! Linked to existing room: %s\n", roomName)})
+					} else {
+						p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("[Map] New room created: %s\n", roomName)})
+					}
+				}
+			}
 		})
 
 		// Start reading in a goroutine
@@ -201,7 +217,6 @@ func main() {
 				te.RemoveTrigger(pattern)
 
 			case "trigger_list":
-				// List triggers and show to user
 				triggers := te.ListTriggers()
 				if len(triggers) == 0 {
 					p.Send(ui.NetworkDataMsg{Data: "No triggers defined.\n"})
@@ -212,6 +227,171 @@ func main() {
 						sb.WriteString(fmt.Sprintf("  '%s' -> '%s'\n", t.Pattern.String(), t.Response))
 					}
 					p.Send(ui.NetworkDataMsg{Data: sb.String()})
+				}
+
+			// --- Mapper Commands ---
+			case "map_create":
+				filename := cmd.ActionArgs["filename"]
+				err := mapEngine.Create(filename)
+				if err != nil {
+					p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("Map Init Error: %v\n", err)})
+				} else {
+					p.Send(ui.NetworkDataMsg{Data: "Map initialized.\n"})
+				}
+
+			case "map_paths":
+				dirsStr := cmd.ActionArgs["directions"]
+				if dirsStr == "" {
+					// Show current paths
+					paths := mapEngine.GetPaths()
+					var pathNames []string
+					for _, d := range paths {
+						pathNames = append(pathNames, string(d))
+					}
+					p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("Configured paths: %s\n", strings.Join(pathNames, ", "))})
+				} else {
+					// Set paths
+					dirList := strings.Split(dirsStr, ",")
+					var newPaths []mapper.Direction
+					var invalid []string
+					for _, d := range dirList {
+						dir, ok := mapper.ParseDirection(d)
+						if ok {
+							newPaths = append(newPaths, dir)
+						} else {
+							invalid = append(invalid, d)
+						}
+					}
+					if len(invalid) > 0 {
+						p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("Invalid directions ignored: %s\n", strings.Join(invalid, ", "))})
+					}
+					if len(newPaths) > 0 {
+						mapEngine.SetPaths(newPaths)
+						var pathNames []string
+						for _, d := range newPaths {
+							pathNames = append(pathNames, string(d))
+						}
+						p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("Paths set to: %s\n", strings.Join(pathNames, ", "))})
+					} else {
+						p.Send(ui.NetworkDataMsg{Data: "No valid directions provided.\n"})
+					}
+				}
+
+			case "map_dig":
+				dir := mapper.Direction(cmd.ActionArgs["direction"])
+				action := cmd.ActionArgs["action"] // Metadata or actual command?
+				// For now just dig.
+				err := mapEngine.Dig(dir, "New Room")
+				if err != nil {
+					p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("Dig Error: %v\n", err)})
+				} else {
+					p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("Dug %s. Created new room.\n", dir)})
+					// Optionally send the action to the server?
+					// "If map dig n open door" -> Dig North, then send "open door"?
+					// User said: "Create a new room... based on the action".
+					// Probably intended to just map it.
+					// If action is provided, maybe store it?
+					if action != "" {
+						// For now, we don't store action in Room struct as per requirements,
+						// but maybe description?
+						mapEngine.SetDescription("Reached via: " + action)
+					}
+				}
+
+			case "map_undo":
+				err := mapEngine.Undo()
+				if err != nil {
+					p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("Undo Error: %v\n", err)})
+				} else {
+					p.Send(ui.NetworkDataMsg{Data: "Undo successful.\n"})
+				}
+
+			case "map_delete":
+				query := cmd.ActionArgs["query"]
+				err := mapEngine.DeleteByNameOrID(query)
+				if err != nil {
+					p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("Delete Error: %v\n", err)})
+				} else {
+					p.Send(ui.NetworkDataMsg{Data: "Room deleted.\n"})
+				}
+
+			case "map_goto":
+				query := cmd.ActionArgs["query"]
+				err := mapEngine.Goto(query)
+				if err != nil {
+					p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("Goto Error: %v\n", err)})
+				} else {
+					r := mapEngine.GetCurrent()
+					p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("Teleported to: %s\n", r.Name)})
+				}
+
+			case "map_link":
+				dirStr := cmd.ActionArgs["direction"]
+				target := cmd.ActionArgs["target"]
+				dir, ok := mapper.ParseDirection(dirStr)
+				if !ok {
+					p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("Invalid direction: %s\n", dirStr)})
+				} else {
+					err := mapEngine.Link(dir, target)
+					if err != nil {
+						p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("Link Error: %v\n", err)})
+					} else {
+						p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("Linked %s to %s.\n", dirStr, target)})
+					}
+				}
+
+			case "map_start":
+				query := cmd.ActionArgs["query"]
+				if query != "" {
+					// Goto specified room first
+					if err := mapEngine.Goto(query); err != nil {
+						p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("Goto Error: %v\n", err)})
+					}
+				}
+				mapEngine.StartAutoMapping()
+				r := mapEngine.GetCurrent()
+				if r != nil {
+					p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("Auto-mapping started at: %s\n", r.Name)})
+				} else {
+					p.Send(ui.NetworkDataMsg{Data: "Auto-mapping started.\n"})
+				}
+
+			case "map_stop":
+				mapEngine.StopAutoMapping()
+				p.Send(ui.NetworkDataMsg{Data: "Auto-mapping stopped.\n"})
+
+			case "map_name":
+				name := cmd.ActionArgs["name"]
+				mapEngine.SetName(name)
+				p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("Room renamed to '%s'.\n", name)})
+
+			case "map_search":
+				query := cmd.ActionArgs["query"]
+				results := mapEngine.Search(query)
+				if len(results) == 0 {
+					p.Send(ui.NetworkDataMsg{Data: "No matches found.\n"})
+				} else {
+					p.Send(ui.NetworkDataMsg{Data: "Search Results:\n" + strings.Join(results, "\n") + "\n"})
+				}
+
+			case "map_show":
+				p.Send(ui.NetworkDataMsg{Data: mapEngine.Show() + "\n"})
+
+			case "map_info":
+				r := mapEngine.GetCurrent()
+				if r != nil {
+					info := fmt.Sprintf("ID: %s\nName: %s\nDescHash: %s\nExits: %v\n", r.ID, r.Name, r.DescriptionHash, r.Exits)
+					p.Send(ui.NetworkDataMsg{Data: info})
+				} else {
+					p.Send(ui.NetworkDataMsg{Data: "No current room.\n"})
+				}
+
+			case "map_exit":
+				err := mapEngine.Save()
+				if err != nil {
+					p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("Save Error: %v\n", err)})
+				} else {
+					p.Send(ui.NetworkDataMsg{Data: "Map saved. Exiting map mode (logic only).\n"})
 				}
 			}
 
@@ -239,6 +419,22 @@ func main() {
 	// 9. Handle Outgoing Data (Goroutine)
 	go func() {
 		for text := range sendChan {
+			// Check auto-mapping before sending to server
+			if mapEngine.IsAutoMapping() {
+				processed, roomName, err := mapEngine.ProcessMovement(strings.TrimSpace(text))
+				if processed {
+					if err != nil {
+						p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("[Map] Error: %v\n", err)})
+					} else if roomName == "[pending room data]" {
+						// Smart auto-mapping: waiting for room description
+						p.Send(ui.NetworkDataMsg{Data: "[Map] Moving... (awaiting room data)\n"})
+					} else {
+						// Moved to known room (existing exit)
+						p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("[Map] Moved to: %s\n", roomName)})
+					}
+				}
+			}
+
 			if client != nil {
 				// Append \r\n if needed, standard Telnet requires CRLF
 				if !strings.HasSuffix(text, "\r\n") {
