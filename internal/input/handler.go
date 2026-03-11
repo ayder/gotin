@@ -3,6 +3,8 @@ package input
 import (
 	"strconv"
 	"strings"
+
+	"dmud/internal/pkg/parser"
 )
 
 // parseBraceDelimitedArgs parses brace-delimited arguments from a string.
@@ -10,57 +12,7 @@ import (
 // Returns the extracted parts. If braces are used, content between matching braces is extracted.
 // Example: "{^Hello (.*)} {say Hi $1}" -> ["^Hello (.*)", "say Hi $1"]
 func parseBraceDelimitedArgs(text string) []string {
-	var results []string
-	remaining := strings.TrimSpace(text)
-
-	for remaining != "" {
-		remaining = strings.TrimSpace(remaining)
-		if remaining == "" {
-			break
-		}
-
-		if strings.HasPrefix(remaining, "{") {
-			// Find matching closing brace
-			depth := 0
-			endIdx := -1
-			for i, ch := range remaining {
-				if ch == '{' {
-					depth++
-				} else if ch == '}' {
-					depth--
-					if depth == 0 {
-						endIdx = i
-						break
-					}
-				}
-			}
-			if endIdx > 0 {
-				// Extract content between braces (excluding the braces themselves)
-				results = append(results, remaining[1:endIdx])
-				remaining = remaining[endIdx+1:]
-			} else {
-				// Unmatched brace, treat rest as one arg
-				results = append(results, remaining)
-				break
-			}
-		} else {
-			// No brace, take until next space or brace
-			nextSpace := strings.IndexAny(remaining, " \t{")
-			if nextSpace == -1 {
-				results = append(results, remaining)
-				break
-			} else if remaining[nextSpace] == '{' {
-				// Found a brace, take everything before it
-				if nextSpace > 0 {
-					results = append(results, remaining[:nextSpace])
-				}
-				remaining = remaining[nextSpace:]
-			} else {
-				results = append(results, remaining[:nextSpace])
-				remaining = remaining[nextSpace+1:]
-			}
-		}
-	}
+	results, _ := parser.ParseBraceArgs(text)
 	return results
 }
 
@@ -115,25 +67,51 @@ func NewHandler() *Handler {
 }
 
 // HandleInput processes user input and determines if it's a local or server command.
-// Returns a CommandResult indicating how to handle the input.
-func (h *Handler) HandleInput(text string) CommandResult {
+// Returns a slice of CommandResults to support multi-command alias expansions.
+func (h *Handler) HandleInput(text string) []CommandResult {
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return CommandResult{IsLocal: false}
+		return []CommandResult{{IsLocal: false}}
 	}
 
 	// Check if it's a local command (starts with /)
 	if strings.HasPrefix(text, CommandPrefix) {
 		// Parse the local command
-		return h.processLocalCommand(text)
+		return []CommandResult{h.processLocalCommand(text)}
 	}
 
 	// Not a local command - expand aliases before sending to server
-	expanded := h.aliases.Expand(text)
-	return CommandResult{
-		IsLocal:    false,
-		ServerText: expanded,
+	// This returns a slice of commands (for multi-command expansions)
+	expandedCommands := h.aliases.Expand(text)
+
+	if len(expandedCommands) == 0 {
+		return []CommandResult{{IsLocal: false}}
 	}
+
+	// Process each expanded command
+	var results []CommandResult
+	for _, cmd := range expandedCommands {
+		cmd = strings.TrimSpace(cmd)
+		if cmd == "" {
+			continue
+		}
+
+		// Check if expanded command is a local command
+		if strings.HasPrefix(cmd, CommandPrefix) {
+			results = append(results, h.processLocalCommand(cmd))
+		} else {
+			results = append(results, CommandResult{
+				IsLocal:    false,
+				ServerText: cmd,
+			})
+		}
+	}
+
+	if len(results) == 0 {
+		return []CommandResult{{IsLocal: false}}
+	}
+
+	return results
 }
 
 // processLocalCommand parses and executes a local command.
@@ -154,7 +132,7 @@ func (h *Handler) processLocalCommand(text string) CommandResult {
 
 	// For commands that support brace delimiters, pass the raw text after the verb
 	switch verb {
-	case "trigger", "untrigger":
+	case "trigger", "untrigger", "alias":
 		// Find where the verb ends and extract the rest as raw text
 		verbEnd := strings.Index(cmdText, verb) + len(verb)
 		rawArgs := strings.TrimSpace(cmdText[verbEnd:])
@@ -227,15 +205,20 @@ func (h *Handler) cmdConnect(args []string) CommandResult {
 // cmdHelp handles the /help command.
 func (h *Handler) cmdHelp(args []string) CommandResult {
 	helpText := `Available commands:
-  /help                            - Show this help message
-  /connect <host> <port>           - Connect to a MUD server
-  /quit or /q                      - Exit the application
-  /alias <key> <value>             - Create an alias (e.g., /alias k kill)
-  /unalias <key>                   - Remove an alias
-  /aliases                         - List all aliases
-  /trigger {pattern} {response}    - Create a trigger (e.g., /trigger {^Greetings (.*)} {say Hello $1})
-  /untrigger {pattern}             - Remove a trigger
-  /triggers                        - List all triggers
+  /help                              - Show this help message
+  /connect <host> <port>             - Connect to a MUD server
+  /quit or /q                        - Exit the application
+  /alias {pattern} {expansion}       - Create an alias
+    Examples:
+      /alias {k $1} {kill $1; skin corpse}
+      /alias {setup} {stand; wear all; look}
+      /alias {hi $1} {say Hello $1; smile $1}
+  /unalias <trigger>                 - Remove an alias by its trigger word
+  /aliases                           - List all aliases
+  /trigger {pattern} {response}      - Create a trigger
+    Example: /trigger {^Greetings (.*)} {say Hello $1}
+  /untrigger {pattern}               - Remove a trigger
+  /triggers                          - List all triggers
 
 All other input is sent to the connected server.`
 
@@ -246,26 +229,38 @@ All other input is sent to the connected server.`
 	}
 }
 
-// cmdAlias handles the /alias command.
+// cmdAlias handles the /alias {pattern} {expansion} command.
+// Supports brace delimiters for patterns and expansions with spaces and special characters.
+// Example: /alias {k $1} {kill $1; skin corpse}
 func (h *Handler) cmdAlias(args []string) CommandResult {
-	if len(args) < 2 {
+	if len(args) == 0 || args[0] == "" {
 		return CommandResult{
 			IsLocal:  true,
 			Handled:  false,
-			Response: "Usage: /alias <key> <value>\nExample: /alias k kill",
+			Response: "Usage: /alias {pattern} {expansion}\nExamples:\n  /alias {k $1} {kill $1; skin corpse}\n  /alias {setup} {stand; wear all; look}",
 		}
 	}
 
-	key := args[0]
-	// Join remaining args as the value (allows multi-word aliases)
-	value := strings.Join(args[1:], " ")
+	// Parse brace-delimited arguments from the raw text
+	parsed := parseBraceDelimitedArgs(args[0])
 
-	h.aliases.Set(key, value)
+	if len(parsed) < 2 {
+		return CommandResult{
+			IsLocal:  true,
+			Handled:  false,
+			Response: "Usage: /alias {pattern} {expansion}\nExamples:\n  /alias {k $1} {kill $1; skin corpse}\n  /alias {setup} {stand; wear all; look}",
+		}
+	}
+
+	pattern := parsed[0]
+	expansion := parsed[1]
+
+	h.aliases.Set(pattern, expansion)
 
 	return CommandResult{
 		IsLocal:  true,
 		Handled:  true,
-		Response: "Alias set: " + key + " -> " + value,
+		Response: "Alias set: {" + pattern + "} -> {" + expansion + "}",
 	}
 }
 
@@ -275,23 +270,24 @@ func (h *Handler) cmdUnalias(args []string) CommandResult {
 		return CommandResult{
 			IsLocal:  true,
 			Handled:  false,
-			Response: "Usage: /unalias <key>",
+			Response: "Usage: /unalias <trigger>",
 		}
 	}
 
-	key := args[0]
-	if h.aliases.Delete(key) {
+	// The trigger is the first word of the pattern
+	trigger := args[0]
+	if h.aliases.Delete(trigger) {
 		return CommandResult{
 			IsLocal:  true,
 			Handled:  true,
-			Response: "Alias removed: " + key,
+			Response: "Alias removed: " + trigger,
 		}
 	}
 
 	return CommandResult{
 		IsLocal:  true,
 		Handled:  false,
-		Response: "Alias not found: " + key,
+		Response: "Alias not found: " + trigger,
 	}
 }
 
@@ -303,14 +299,14 @@ func (h *Handler) cmdAliases(args []string) CommandResult {
 		return CommandResult{
 			IsLocal:  true,
 			Handled:  true,
-			Response: "No aliases defined. Use /alias <key> <value> to create one.",
+			Response: "No aliases defined. Use /alias {pattern} {expansion} to create one.",
 		}
 	}
 
 	var sb strings.Builder
 	sb.WriteString("Defined aliases:\n")
-	for key, value := range aliases {
-		sb.WriteString("  " + key + " -> " + value + "\n")
+	for pattern, expansion := range aliases {
+		sb.WriteString("  {" + pattern + "} -> {" + expansion + "}\n")
 	}
 
 	return CommandResult{
@@ -327,8 +323,8 @@ func (h *Handler) GetAliases() map[string]string {
 
 // SetAliases loads aliases from a map (used for loading config).
 func (h *Handler) SetAliases(aliases map[string]string) {
-	for key, value := range aliases {
-		h.aliases.Set(key, value)
+	for pattern, expansion := range aliases {
+		h.aliases.Set(pattern, expansion)
 	}
 }
 
@@ -512,7 +508,11 @@ func (h *Handler) cmdMap(args []string) CommandResult {
 		result.ActionArgs["query"] = strings.Join(subargs, " ")
 		result.Response = "Searching..."
 
-	case "show", "info", "exit":
+	case "show":
+		if len(subargs) > 0 {
+			result.ActionArgs["scope"] = subargs[0]
+		}
+	case "info", "exit":
 		// No args needed
 
 	default:

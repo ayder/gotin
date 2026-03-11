@@ -90,46 +90,58 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case tea.KeyEnter:
 			value := m.textinput.Value()
-			if value != "" {
-				m.history.Add(value)
-				// Process input through command handler
-				result := m.commandHandler.HandleInput(value)
+			// Process even if value is empty
+			m.history.Add(value)
+			// Process input through command handler
+			// HandleInput returns []CommandResult for multi-command alias support
+			results := m.commandHandler.HandleInput(value)
+
+			// Echo the original input first (for server commands)
+			hasServerCommand := false
+			for _, r := range results {
+				if !r.IsLocal {
+					hasServerCommand = true
+					break
+				}
+			}
+
+			if hasServerCommand {
+				if m.textinput.EchoMode == textinput.EchoNormal {
+					m.appendContent(value + "\n")
+				} else {
+					m.appendContent("\n")
+				}
+			}
+
+			m.textinput.Reset()
+
+			// Process each result
+			for _, result := range results {
 				if result.IsLocal {
 					// Local command - display response and send action via channel
 					if result.Response != "" {
-						m.appendContent(result.Response)
+						m.appendContent(result.Response + "\n")
 					}
-					m.textinput.Reset()
 					// Send action to local command channel (non-blocking)
 					if m.LocalChan != nil && result.Action != "" {
 						go func(r input.CommandResult) {
 							m.LocalChan <- r
 						}(result)
 					}
-					return m, nil
+				} else if result.ServerText != "" || value == "" {
+					// Server command - send to server (or empty if value was "")
+					if m.SendChan != nil {
+						// For empty value, send empty string to signal an "enter"
+						textToSend := result.ServerText
+						if value == "" {
+							textToSend = ""
+						}
+						go func(cmd string) {
+							m.SendChan <- cmd
+						}(textToSend)
+					}
 				}
-				// Server command - determine how to echo
-				if m.textinput.EchoMode == textinput.EchoNormal {
-					// Normal input: echo "value\n"
-					// We add the newline so subsequent output starts on a new line
-					m.appendContent(value + "\n")
-				} else {
-					// Password/Masked input: usually we print nothing or just a newline
-					// to simulate the user hitting enter without revealing the password.
-					m.appendContent("\n")
-				}
-
-				m.textinput.Reset()
-				if m.SendChan != nil {
-					// Send the alias-expanded text to server
-					serverText := result.ServerText
-					go func(cmd string) {
-						m.SendChan <- cmd
-					}(serverText)
-				}
-				return m, nil
 			}
-			m.textinput.Reset()
 			return m, nil
 		case tea.KeyPgUp:
 			m.viewport.ViewUp()
@@ -262,12 +274,10 @@ func (m Model) View() string {
 		return "Initializing..."
 	}
 
-	// Style for the viewport border
+	// Style for the viewport (no border)
 	viewportStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("62")).
-		Width(m.width - 2).
-		Height(m.height - inputHeight - 2)
+		Width(m.width).
+		Height(m.height - inputHeight)
 
 	// Style for the input border
 	inputStyle := lipgloss.NewStyle().

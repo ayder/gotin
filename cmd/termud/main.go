@@ -375,7 +375,16 @@ func main() {
 				}
 
 			case "map_show":
-				p.Send(ui.NetworkDataMsg{Data: mapEngine.Show() + "\n"})
+				scope := cmd.ActionArgs["scope"]
+				radius := 3 // default
+				if scope == "all" {
+					radius = -1
+				} else if scope != "" {
+					if val, err := strconv.Atoi(scope); err == nil {
+						radius = val
+					}
+				}
+				p.Send(ui.NetworkDataMsg{Data: mapEngine.Show(radius) + "\n"})
 
 			case "map_info":
 				r := mapEngine.GetCurrent()
@@ -387,11 +396,12 @@ func main() {
 				}
 
 			case "map_exit":
+				mapEngine.StopAutoMapping()
 				err := mapEngine.Save()
 				if err != nil {
 					p.Send(ui.NetworkDataMsg{Data: fmt.Sprintf("Save Error: %v\n", err)})
 				} else {
-					p.Send(ui.NetworkDataMsg{Data: "Map saved. Exiting map mode (logic only).\n"})
+					p.Send(ui.NetworkDataMsg{Data: "Map saved. Auto-mapping stopped.\n"})
 				}
 			}
 

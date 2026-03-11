@@ -8,58 +8,62 @@ func TestHandleInput_LocalCommand(t *testing.T) {
 	h := NewHandler()
 
 	tests := []struct {
-		name      string
-		input     string
-		wantLocal bool
+		name       string
+		input      string
+		wantLocal  bool
 		wantAction string
 	}{
 		{
-			name:      "quit command",
-			input:     "/quit",
-			wantLocal: true,
+			name:       "quit command",
+			input:      "/quit",
+			wantLocal:  true,
 			wantAction: "quit",
 		},
 		{
-			name:      "q alias for quit",
-			input:     "/q",
-			wantLocal: true,
+			name:       "q alias for quit",
+			input:      "/q",
+			wantLocal:  true,
 			wantAction: "quit",
 		},
 		{
-			name:      "help command",
-			input:     "/help",
-			wantLocal: true,
+			name:       "help command",
+			input:      "/help",
+			wantLocal:  true,
 			wantAction: "",
 		},
 		{
-			name:      "connect command with args",
-			input:     "/connect example.com 1234",
-			wantLocal: true,
+			name:       "connect command with args",
+			input:      "/connect example.com 1234",
+			wantLocal:  true,
 			wantAction: "connect",
 		},
 		{
-			name:      "server command",
-			input:     "say hello",
-			wantLocal: false,
+			name:       "server command",
+			input:      "say hello",
+			wantLocal:  false,
 			wantAction: "",
 		},
 		{
-			name:      "empty input",
-			input:     "",
-			wantLocal: false,
+			name:       "empty input",
+			input:      "",
+			wantLocal:  false,
 			wantAction: "",
 		},
 		{
-			name:      "unknown local command",
-			input:     "/unknown",
-			wantLocal: true,
+			name:       "unknown local command",
+			input:      "/unknown",
+			wantLocal:  true,
 			wantAction: "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := h.HandleInput(tt.input)
+			results := h.HandleInput(tt.input)
+			if len(results) == 0 {
+				t.Fatalf("HandleInput(%q) returned empty results", tt.input)
+			}
+			result := results[0]
 			if result.IsLocal != tt.wantLocal {
 				t.Errorf("HandleInput(%q).IsLocal = %v, want %v", tt.input, result.IsLocal, tt.wantLocal)
 			}
@@ -106,7 +110,11 @@ func TestHandleInput_ConnectValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := h.HandleInput(tt.input)
+			results := h.HandleInput(tt.input)
+			if len(results) == 0 {
+				t.Fatalf("HandleInput(%q) returned empty results", tt.input)
+			}
+			result := results[0]
 			if result.Handled != tt.wantHandled {
 				t.Errorf("HandleInput(%q).Handled = %v, want %v", tt.input, result.Handled, tt.wantHandled)
 			}
@@ -124,7 +132,11 @@ func TestHandleInput_ConnectValidation(t *testing.T) {
 
 func TestHandleInput_HelpResponse(t *testing.T) {
 	h := NewHandler()
-	result := h.HandleInput("/help")
+	results := h.HandleInput("/help")
+	if len(results) == 0 {
+		t.Fatal("HandleInput(/help) returned empty results")
+	}
+	result := results[0]
 
 	if !result.IsLocal {
 		t.Error("Expected /help to be a local command")
@@ -248,7 +260,11 @@ func TestHandleInput_TriggerCommand(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := h.HandleInput(tt.input)
+			results := h.HandleInput(tt.input)
+			if len(results) == 0 {
+				t.Fatalf("HandleInput(%q) returned empty results", tt.input)
+			}
+			result := results[0]
 			if result.Handled != tt.wantHandled {
 				t.Errorf("HandleInput(%q).Handled = %v, want %v\nResponse: %s",
 					tt.input, result.Handled, tt.wantHandled, result.Response)
@@ -307,7 +323,11 @@ func TestHandleInput_UntriggerCommand(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := h.HandleInput(tt.input)
+			results := h.HandleInput(tt.input)
+			if len(results) == 0 {
+				t.Fatalf("HandleInput(%q) returned empty results", tt.input)
+			}
+			result := results[0]
 			if result.Handled != tt.wantHandled {
 				t.Errorf("HandleInput(%q).Handled = %v, want %v\nResponse: %s",
 					tt.input, result.Handled, tt.wantHandled, result.Response)

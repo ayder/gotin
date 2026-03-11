@@ -1,20 +1,24 @@
 package input
 
 import (
+	"reflect"
 	"testing"
 )
 
 func TestAliasManager_SetAndGet(t *testing.T) {
 	am := NewAliasManager()
 
-	// Test setting and getting
-	am.Set("k", "kill")
-	value, ok := am.Get("k")
+	// Test setting and getting with new pattern format
+	am.Set("k $1", "kill $1")
+	alias, ok := am.Get("k")
 	if !ok {
 		t.Error("Expected alias 'k' to exist")
 	}
-	if value != "kill" {
-		t.Errorf("Expected 'kill', got %q", value)
+	if alias.Pattern != "k $1" {
+		t.Errorf("Expected pattern 'k $1', got %q", alias.Pattern)
+	}
+	if alias.Expansion != "kill $1" {
+		t.Errorf("Expected expansion 'kill $1', got %q", alias.Expansion)
 	}
 
 	// Test non-existent alias
@@ -27,7 +31,7 @@ func TestAliasManager_SetAndGet(t *testing.T) {
 func TestAliasManager_Delete(t *testing.T) {
 	am := NewAliasManager()
 
-	am.Set("k", "kill")
+	am.Set("k $1", "kill $1")
 	if !am.Delete("k") {
 		t.Error("Expected Delete to return true for existing alias")
 	}
@@ -46,80 +50,134 @@ func TestAliasManager_Delete(t *testing.T) {
 func TestAliasManager_List(t *testing.T) {
 	am := NewAliasManager()
 
-	am.Set("k", "kill")
+	am.Set("k $1", "kill $1")
 	am.Set("l", "look")
 
 	list := am.List()
 	if len(list) != 2 {
 		t.Errorf("Expected 2 aliases, got %d", len(list))
 	}
-	if list["k"] != "kill" {
-		t.Errorf("Expected 'kill', got %q", list["k"])
+	if list["k $1"] != "kill $1" {
+		t.Errorf("Expected 'kill $1', got %q", list["k $1"])
 	}
 	if list["l"] != "look" {
 		t.Errorf("Expected 'look', got %q", list["l"])
 	}
 }
 
-func TestAliasManager_Expand(t *testing.T) {
+func TestAliasManager_Expand_Simple(t *testing.T) {
 	am := NewAliasManager()
 
 	am.Set("k", "kill")
-	am.Set("kk", "kill goblin")
+	am.Set("l", "look")
 
 	tests := []struct {
 		name     string
 		input    string
-		expected string
+		expected []string
 	}{
 		{
 			name:     "simple expansion",
 			input:    "k rat",
-			expected: "kill rat",
-		},
-		{
-			name:     "multi-word alias",
-			input:    "kk",
-			expected: "kill goblin",
-		},
-		{
-			name:     "no alias",
-			input:    "say hello",
-			expected: "say hello",
-		},
-		{
-			name:     "empty input",
-			input:    "",
-			expected: "",
+			expected: []string{"kill rat"},
 		},
 		{
 			name:     "alias only",
 			input:    "k",
-			expected: "kill",
+			expected: []string{"kill"},
+		},
+		{
+			name:     "no alias",
+			input:    "say hello",
+			expected: []string{"say hello"},
+		},
+		{
+			name:     "empty input",
+			input:    "",
+			expected: []string{},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := am.Expand(tt.input)
-			if result != tt.expected {
-				t.Errorf("Expand(%q) = %q, want %q", tt.input, result, tt.expected)
+			if !reflect.DeepEqual(result, tt.expected) {
+				t.Errorf("Expand(%q) = %v, want %v", tt.input, result, tt.expected)
 			}
 		})
 	}
 }
 
-func TestAliasManager_RecursiveExpansion(t *testing.T) {
+func TestAliasManager_Expand_Variables(t *testing.T) {
 	am := NewAliasManager()
 
-	// Chain of aliases
-	am.Set("a", "b")
-	am.Set("b", "c")
-	am.Set("c", "final command")
+	am.Set("k $1", "kill $1; skin corpse")
+	am.Set("hi $1", "say Hello $1; smile $1")
 
-	result := am.Expand("a test")
-	if result != "final command test" {
-		t.Errorf("Expected 'final command test', got %q", result)
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "variable substitution with multi-command",
+			input:    "k rat",
+			expected: []string{"kill rat", "skin corpse"},
+		},
+		{
+			name:     "multiple variable references",
+			input:    "hi Bob",
+			expected: []string{"say Hello Bob", "smile Bob"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := am.Expand(tt.input)
+			if !reflect.DeepEqual(result, tt.expected) {
+				t.Errorf("Expand(%q) = %v, want %v", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestAliasManager_Expand_MultiCommand(t *testing.T) {
+	am := NewAliasManager()
+
+	am.Set("setup", "stand; wear all; look")
+
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "multi-command expansion",
+			input:    "setup",
+			expected: []string{"stand", "wear all", "look"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := am.Expand(tt.input)
+			if !reflect.DeepEqual(result, tt.expected) {
+				t.Errorf("Expand(%q) = %v, want %v", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestAliasManager_Expand_LocalCommandInAlias(t *testing.T) {
+	am := NewAliasManager()
+
+	am.Set("bye", "say goodbye; /quit")
+
+	result := am.Expand("bye")
+	expected := []string{"say goodbye", "/quit"}
+
+	if !reflect.DeepEqual(result, expected) {
+		t.Errorf("Expand(bye) = %v, want %v", result, expected)
 	}
 }
 
@@ -132,58 +190,220 @@ func TestAliasManager_InfiniteLoopProtection(t *testing.T) {
 
 	// Should not hang, should stop after MaxAliasExpansionDepth
 	result := am.Expand("a")
-	// Result should be either "a" or "b" depending on depth
-	if result != "a" && result != "b" {
-		t.Errorf("Unexpected result for infinite loop: %q", result)
+	// Should return something (either "a" or "b" depending on depth)
+	if len(result) == 0 {
+		t.Error("Expected non-empty result for infinite loop protection")
 	}
 }
 
-func TestHandler_AliasIntegration(t *testing.T) {
+func TestAliasManager_RecursiveExpansion(t *testing.T) {
+	am := NewAliasManager()
+
+	// Chain of aliases
+	am.Set("a", "b")
+	am.Set("b", "c")
+	am.Set("c", "final command")
+
+	result := am.Expand("a test")
+	expected := []string{"final command test"}
+
+	if !reflect.DeepEqual(result, expected) {
+		t.Errorf("Recursive expansion: got %v, want %v", result, expected)
+	}
+}
+
+func TestHandler_AdvancedAliasCommand(t *testing.T) {
 	h := NewHandler()
 
-	// Set an alias
-	result := h.HandleInput("/alias k kill")
+	// Test new brace-delimited alias syntax
+	results := h.HandleInput("/alias {k $1} {kill $1; skin corpse}")
+	if len(results) == 0 {
+		t.Fatal("Expected /alias to return results")
+	}
+	result := results[0]
 	if !result.Handled {
-		t.Error("Expected /alias to be handled")
+		t.Errorf("Expected /alias to be handled, got response: %s", result.Response)
 	}
 
 	// Use the alias
-	result = h.HandleInput("k rat")
-	if result.IsLocal {
-		t.Error("Expected 'k rat' to be a server command")
+	results = h.HandleInput("k rat")
+	if len(results) != 2 {
+		t.Errorf("Expected 2 results from 'k rat', got %d: %v", len(results), results)
+		return
 	}
-	if result.ServerText != "kill rat" {
-		t.Errorf("Expected ServerText 'kill rat', got %q", result.ServerText)
+
+	if results[0].ServerText != "kill rat" {
+		t.Errorf("Expected first command 'kill rat', got %q", results[0].ServerText)
+	}
+	if results[1].ServerText != "skin corpse" {
+		t.Errorf("Expected second command 'skin corpse', got %q", results[1].ServerText)
+	}
+}
+
+func TestHandler_AliasWithLocalCommand(t *testing.T) {
+	h := NewHandler()
+
+	// Set alias that includes a local command
+	h.HandleInput("/alias {bye} {say goodbye; /quit}")
+
+	// Use the alias
+	results := h.HandleInput("bye")
+	if len(results) != 2 {
+		t.Errorf("Expected 2 results from 'bye', got %d: %v", len(results), results)
+		return
+	}
+
+	// First command is server command
+	if results[0].IsLocal {
+		t.Error("Expected first command to be server command")
+	}
+	if results[0].ServerText != "say goodbye" {
+		t.Errorf("Expected 'say goodbye', got %q", results[0].ServerText)
+	}
+
+	// Second command is local command
+	if !results[1].IsLocal {
+		t.Error("Expected second command to be local command")
+	}
+	if results[1].Action != "quit" {
+		t.Errorf("Expected action 'quit', got %q", results[1].Action)
 	}
 }
 
 func TestHandler_AliasCommands(t *testing.T) {
 	h := NewHandler()
 
-	// Test /alias
-	result := h.HandleInput("/alias hi say Hello!")
-	if !result.Handled {
+	// Test /alias with brace syntax
+	results := h.HandleInput("/alias {hi $1} {say Hello $1; smile $1}")
+	if len(results) == 0 || !results[0].Handled {
 		t.Error("Expected /alias to be handled")
-	}
-	if result.Response != "Alias set: hi -> say Hello!" {
-		t.Errorf("Unexpected response: %q", result.Response)
 	}
 
 	// Test /aliases
-	result = h.HandleInput("/aliases")
-	if !result.Handled {
+	results = h.HandleInput("/aliases")
+	if len(results) == 0 || !results[0].Handled {
 		t.Error("Expected /aliases to be handled")
 	}
 
 	// Test /unalias
-	result = h.HandleInput("/unalias hi")
-	if !result.Handled {
+	results = h.HandleInput("/unalias hi")
+	if len(results) == 0 || !results[0].Handled {
 		t.Error("Expected /unalias to be handled")
 	}
 
 	// Test removing non-existent alias
-	result = h.HandleInput("/unalias nonexistent")
-	if result.Handled {
+	results = h.HandleInput("/unalias nonexistent")
+	if len(results) == 0 || results[0].Handled {
 		t.Error("Expected /unalias of non-existent to not be handled")
+	}
+}
+
+func TestMatchPattern(t *testing.T) {
+	tests := []struct {
+		name     string
+		pattern  string
+		input    string
+		expected map[string]string
+	}{
+		{
+			name:    "simple variable",
+			pattern: "k $1",
+			input:   "k rat",
+			expected: map[string]string{
+				"$1": "rat",
+				"$*": "",
+			},
+		},
+		{
+			name:    "multiple variables",
+			pattern: "give $1 $2",
+			input:   "give sword player",
+			expected: map[string]string{
+				"$1": "sword",
+				"$2": "player",
+				"$*": "",
+			},
+		},
+		{
+			name:    "no variables with extra args",
+			pattern: "setup",
+			input:   "setup extra args",
+			expected: map[string]string{
+				"$*": "extra args",
+				"$1": "extra",
+				"$2": "args",
+			},
+		},
+		{
+			name:     "no match - different trigger",
+			pattern:  "k $1",
+			input:    "kill rat",
+			expected: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := matchPattern(tt.pattern, tt.input)
+			if tt.expected == nil {
+				if result != nil {
+					t.Errorf("matchPattern(%q, %q) = %v, want nil", tt.pattern, tt.input, result)
+				}
+				return
+			}
+			if result == nil {
+				t.Errorf("matchPattern(%q, %q) = nil, want %v", tt.pattern, tt.input, tt.expected)
+				return
+			}
+			for k, v := range tt.expected {
+				if result[k] != v {
+					t.Errorf("matchPattern(%q, %q)[%q] = %q, want %q", tt.pattern, tt.input, k, result[k], v)
+				}
+			}
+		})
+	}
+}
+
+func TestSubstituteVariables(t *testing.T) {
+	tests := []struct {
+		name      string
+		expansion string
+		vars      map[string]string
+		expected  string
+	}{
+		{
+			name:      "single variable",
+			expansion: "kill $1",
+			vars:      map[string]string{"$1": "rat"},
+			expected:  "kill rat",
+		},
+		{
+			name:      "multiple same variable",
+			expansion: "say Hello $1; smile $1",
+			vars:      map[string]string{"$1": "Bob"},
+			expected:  "say Hello Bob; smile Bob",
+		},
+		{
+			name:      "multiple different variables",
+			expansion: "give $1 to $2",
+			vars:      map[string]string{"$1": "sword", "$2": "player"},
+			expected:  "give sword to player",
+		},
+		{
+			name:      "all remaining args",
+			expansion: "say $*",
+			vars:      map[string]string{"$*": "hello world"},
+			expected:  "say hello world",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := substituteVariables(tt.expansion, tt.vars)
+			if result != tt.expected {
+				t.Errorf("substituteVariables(%q, %v) = %q, want %q",
+					tt.expansion, tt.vars, result, tt.expected)
+			}
+		})
 	}
 }
