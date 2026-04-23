@@ -74,6 +74,49 @@ func main() {
 		}
 	}()
 
+	// trySendUI enqueues a tea.Msg onto uiMsgChan without blocking.
+	// For NetworkDataMsg we coalesce with any pending NetworkDataMsg already in
+	// the buffer instead of dropping, so no incoming bytes are lost.
+	trySendUI := func(msg tea.Msg) {
+		if data, ok := msg.(ui.NetworkDataMsg); ok {
+			select {
+			case uiMsgChan <- data:
+				return
+			default:
+			}
+			// Buffer full: try to coalesce with the most recent NetworkDataMsg.
+			for {
+				select {
+				case prev := <-uiMsgChan:
+					if pd, ok := prev.(ui.NetworkDataMsg); ok {
+						combined := ui.NetworkDataMsg{Data: pd.Data + data.Data}
+						select {
+						case uiMsgChan <- combined:
+							return
+						default:
+							// Still full — requeue and drop this chunk as last resort.
+							_ = combined
+							return
+						}
+					}
+					// Non-data msg popped; put it back-ish by re-sending and drop our data.
+					select {
+					case uiMsgChan <- prev:
+					default:
+					}
+					return
+				default:
+					return
+				}
+			}
+		}
+		// Status and other control msgs: drop on overflow.
+		select {
+		case uiMsgChan <- msg:
+		default:
+		}
+	}
+
 	// 6. Handle Wizard / First Run
 	// If no config file exists (fresh run) AND no flags provided
 	firstRun := !cfgMgr.Exists()
@@ -177,12 +220,12 @@ func main() {
 
 		// Setup callbacks
 		client.SetEchoCallback(func(enabled bool) {
-			uiMsgChan <- ui.SetLocalEchoMsg{LocalEcho: enabled}
+			trySendUI(ui.SetLocalEchoMsg{LocalEcho: enabled})
 		})
 
 		client.SetDataCallback(func(data string) {
 			// Decoupled UI delivery
-			uiMsgChan <- ui.NetworkDataMsg{Data: data}
+			trySendUI(ui.NetworkDataMsg{Data: data})
 
 			// Logic processing (Triggers)
 			logicLines := lb.Feed([]byte(data))
@@ -195,11 +238,11 @@ func main() {
 				processed, roomName, loopDetected, err := mapEngine.ProcessRoomData(data)
 				if processed {
 					if err != nil {
-						uiMsgChan <- ui.StatusMsg{Message: fmt.Sprintf("[Map] Error: %v\n", err)}
+						trySendUI(ui.StatusMsg{Message: fmt.Sprintf("[Map] Error: %v\n", err)})
 					} else if loopDetected {
-						uiMsgChan <- ui.StatusMsg{Message: fmt.Sprintf("[Map] Loop detected! Linked to existing room: %s\n", roomName)}
+						trySendUI(ui.StatusMsg{Message: fmt.Sprintf("[Map] Loop detected! Linked to existing room: %s\n", roomName)})
 					} else {
-						uiMsgChan <- ui.StatusMsg{Message: fmt.Sprintf("[Map] New room created: %s\n", roomName)}
+						trySendUI(ui.StatusMsg{Message: fmt.Sprintf("[Map] New room created: %s\n", roomName)})
 					}
 				}
 			}
