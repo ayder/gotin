@@ -2,6 +2,7 @@ package ui
 
 import (
 	"strings"
+	"time"
 
 	"dmud/internal/input"
 
@@ -38,6 +39,9 @@ type LocalCommandMsg struct {
 	Result input.CommandResult
 }
 
+// renderTickMsg schedules a coalesced viewport render.
+type renderTickMsg struct{}
+
 // Model represents the TUI state for the MUD client.
 type Model struct {
 	viewport       viewport.Model
@@ -50,6 +54,8 @@ type Model struct {
 	content        []string // stores all lines displayed in viewport
 	statusMsg      string   // stores current status for border title
 	showHelp       bool     // whether the help widget is visible
+	contentDirty   bool     // set when appendContent modifies m.content but viewport hasn't been updated yet
+	pendingTick    bool     // true while a renderTickMsg is queued
 
 	// Channels for command routing
 	SendChan  chan<- string              // Channel to send commands to server
@@ -132,6 +138,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			m.textinput.Reset()
 
+			// Schedule a tick if appendContent made content dirty
+			var tickCmd tea.Cmd
+			if m.contentDirty && !m.pendingTick {
+				m.pendingTick = true
+				tickCmd = scheduleRenderTick()
+			}
+			if tickCmd != nil {
+				cmds = append(cmds, tickCmd)
+			}
+
 			// Process each result
 			for _, result := range results {
 				if result.IsLocal {
@@ -144,6 +160,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						trimmed := strings.TrimSpace(result.Response)
 						if strings.Contains(trimmed, "\n") {
 							m.appendContent(result.Response + "\n")
+							// Schedule a tick for this appendContent call
+							if !m.pendingTick {
+								m.pendingTick = true
+								cmds = append(cmds, scheduleRenderTick())
+							}
 						} else {
 							m.statusMsg = trimmed
 						}
@@ -172,7 +193,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
-			return m, nil
+			return m, tea.Batch(cmds...)
+
 		case tea.KeyPgUp:
 			m.viewport.ViewUp()
 			return m, nil
@@ -220,18 +242,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case renderTickMsg:
+		m.flushViewport()
+		m.pendingTick = false
+		if m.contentDirty {
+			return m, scheduleRenderTick()
+		}
+		return m, nil
+
 	case StatusMsg:
 		trimmed := strings.TrimSpace(msg.Message)
 		if strings.Contains(trimmed, "\n") {
 			m.appendContent(msg.Message)
-		} else {
-			m.statusMsg = trimmed
+			var tickCmd tea.Cmd
+			if !m.pendingTick {
+				m.pendingTick = true
+				tickCmd = scheduleRenderTick()
+			}
+			return m, tickCmd
 		}
+		m.statusMsg = trimmed
 		return m, nil
 
 	case NetworkDataMsg:
 		m.appendContent(msg.Data)
-		return m, nil
+		var tickCmd tea.Cmd
+		if !m.pendingTick {
+			m.pendingTick = true
+			tickCmd = scheduleRenderTick()
+		}
+		return m, tickCmd
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -277,43 +317,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// appendContent adds incoming text to the viewport content.
-// It handles partial lines by appending to the last line if needed.
+// appendContent mutates m.content with incoming text. It does NOT touch the
+// viewport directly; a renderTickMsg coalesces the actual SetContent call.
 func (m *Model) appendContent(text string) {
-	// Calculate distance from bottom before update
-	distFromBottom := m.viewport.TotalLineCount() - (m.viewport.YOffset + m.viewport.Height)
-	shouldAutoScroll := distFromBottom <= 1
-
-	// If m.content is empty, start it.
 	if len(m.content) == 0 {
 		m.content = []string{""}
 	}
-
 	parts := strings.Split(text, "\n")
-
-	// Update the current last line with the first part of new text
 	lastIdx := len(m.content) - 1
 	m.content[lastIdx] += parts[0]
-
-	// Add any subsequent parts as new lines
 	for i := 1; i < len(parts); i++ {
 		m.content = append(m.content, parts[i])
 	}
-
-	// Optimization: limit total history to prevent performance degradation over time
 	const maxHistory = 5000
 	if len(m.content) > maxHistory {
 		m.content = m.content[len(m.content)-maxHistory:]
 	}
+	m.contentDirty = true
+}
 
-	// Update viewport content - this is still O(N) where N is history size,
-	// but we've optimized the string manipulation before this point.
+// flushViewport pushes m.content into the viewport in one pass and
+// auto-scrolls if we were near the bottom. Safe to call when nothing has
+// changed (no-op on !contentDirty).
+func (m *Model) flushViewport() {
+	if !m.contentDirty {
+		return
+	}
+	distFromBottom := m.viewport.TotalLineCount() - (m.viewport.YOffset + m.viewport.Height)
+	shouldAutoScroll := distFromBottom <= 1
+
 	m.viewport.SetContent(strings.Join(m.content, "\n"))
-
-	// Auto-scroll if we were near the bottom
 	if shouldAutoScroll {
 		m.viewport.GotoBottom()
 	}
+	m.contentDirty = false
+}
+
+// scheduleRenderTick returns a Cmd that fires a renderTickMsg after ~16ms.
+func scheduleRenderTick() tea.Cmd {
+	return tea.Tick(16*time.Millisecond, func(time.Time) tea.Msg {
+		return renderTickMsg{}
+	})
 }
 
 // View renders the TUI.
@@ -321,15 +365,19 @@ func (m Model) View() string {
 	if !m.ready {
 		return "Initializing..."
 	}
+	// Value receiver: take a local copy and flush it so we render the
+	// current state even between render ticks.
+	mm := m
+	mm.flushViewport()
 
-	if m.showHelp {
-		return m.renderHelpWidget()
+	if mm.showHelp {
+		return mm.renderHelpWidget()
 	}
 
 	// Style for the viewport (no border)
 	viewportStyle := lipgloss.NewStyle().
-		Width(m.width).
-		Height(m.height - inputHeight)
+		Width(mm.width).
+		Height(mm.height - inputHeight)
 
 	// Style for the input border
 	border := lipgloss.RoundedBorder()
@@ -337,15 +385,15 @@ func (m Model) View() string {
 		Border(border).
 		BorderTop(false).
 		BorderForeground(lipgloss.Color("62")).
-		Width(m.width - 2)
+		Width(mm.width - 2)
 
-	topBorderWidth := m.width
+	topBorderWidth := mm.width
 	var topBorder strings.Builder
 	topBorder.WriteString(border.TopLeft)
 
 	titleStr := ""
-	if m.statusMsg != "" {
-		titleStr = " " + m.statusMsg + " "
+	if mm.statusMsg != "" {
+		titleStr = " " + mm.statusMsg + " "
 	}
 
 	titleWidth := lipgloss.Width(titleStr)
@@ -376,11 +424,11 @@ func (m Model) View() string {
 
 	// Build the view
 	var b strings.Builder
-	b.WriteString(viewportStyle.Render(m.viewport.View()))
+	b.WriteString(viewportStyle.Render(mm.viewport.View()))
 	b.WriteString("\n")
 	b.WriteString(topBorderStyle.Render(topBorder.String()))
 	b.WriteString("\n")
-	b.WriteString(inputStyle.Render(m.textinput.View()))
+	b.WriteString(inputStyle.Render(mm.textinput.View()))
 
 	return b.String()
 }
