@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -262,9 +263,10 @@ func main() {
 
 		c.SetDisconnectCallback(func(reason error) {
 			var msg string
+			var ne net.Error
 			if reason == nil {
 				msg = "\nConnection closed (server disconnected).\n"
-			} else if ne, ok := reason.(net.Error); ok && ne.Timeout() {
+			} else if errors.As(reason, &ne) && ne.Timeout() {
 				msg = "\nConnection closed (read timeout; server may be unresponsive).\n"
 			} else {
 				msg = fmt.Sprintf("\nConnection closed: %v\n", reason)

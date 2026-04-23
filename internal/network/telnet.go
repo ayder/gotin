@@ -2,6 +2,7 @@ package network
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -25,6 +26,7 @@ type Client struct {
 	disconnectCallback func(reason error) // called when ReadLoop exits; reason is nil for clean close
 	windowWidth        int               // terminal width for NAWS
 	windowHeight       int               // terminal height for NAWS
+	readDeadline       time.Duration     // per-read timeout; defaults to 5 minutes
 	pending            []byte            // pending bytes from incomplete IAC sequences
 }
 
@@ -48,6 +50,12 @@ func (c *Client) SetDataCallback(callback func(data string)) {
 // and transport failures.
 func (c *Client) SetDisconnectCallback(callback func(reason error)) {
 	c.disconnectCallback = callback
+}
+
+// SetReadTimeout overrides the per-read deadline used by ReadLoop.
+// Defaults to 5 minutes; pass 0 to disable.
+func (c *Client) SetReadTimeout(d time.Duration) {
+	c.readDeadline = d
 }
 
 // Send writes raw bytes to the connection.
@@ -271,11 +279,15 @@ func (c *Client) ReadLoop() {
 
 	for {
 		// Set read deadline to handle stale connections
-		c.conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
+		deadline := c.readDeadline
+		if deadline <= 0 {
+			deadline = 5 * time.Minute
+		}
+		c.conn.SetReadDeadline(time.Now().Add(deadline))
 
 		n, err := c.reader.Read(buffer)
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				// Clean disconnect
 				exitErr = nil
 				return

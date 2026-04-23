@@ -36,3 +36,28 @@ func TestDisconnectCallback_EOF(t *testing.T) {
 		t.Fatalf("expected nil or io.EOF, got %v", gotErr)
 	}
 }
+
+func TestDisconnectCallback_Timeout(t *testing.T) {
+	_, clientConn := net.Pipe()
+	c := &Client{
+		conn:    clientConn,
+		reader:  bufio.NewReader(clientConn),
+		decoder: NewDecoder(),
+	}
+	c.SetReadTimeout(50 * time.Millisecond)
+
+	gotErr := make(chan error, 1)
+	c.SetDisconnectCallback(func(err error) { gotErr <- err })
+
+	go c.ReadLoop()
+
+	select {
+	case err := <-gotErr:
+		var ne net.Error
+		if !errors.As(err, &ne) || !ne.Timeout() {
+			t.Fatalf("expected net.Error with Timeout()==true, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("callback not invoked within 2s")
+	}
+}
