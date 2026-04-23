@@ -27,6 +27,7 @@ type Trigger struct {
 // TriggerEngine manages a list of triggers and checks incoming lines against them.
 type TriggerEngine struct {
 	triggers     []Trigger
+	triggersMux  sync.RWMutex
 	sendFunc     func(string) // Callback to send responses to the network
 	lastFired    map[string]time.Time
 	lastFiredMux sync.Mutex
@@ -49,15 +50,15 @@ func (te *TriggerEngine) AddTrigger(pattern string, response string) error {
 	if err != nil {
 		return err
 	}
-
-	// Optimization: check if there's a literal prefix we can use
 	literal, _ := re.LiteralPrefix()
 
+	te.triggersMux.Lock()
 	te.triggers = append(te.triggers, Trigger{
 		Pattern:       re,
 		Response:      response,
 		LiteralPrefix: literal,
 	})
+	te.triggersMux.Unlock()
 	return nil
 }
 
@@ -69,39 +70,30 @@ func (te *TriggerEngine) CheckLine(line string) []string {
 	var triggered []string
 	now := time.Now()
 
-	for _, t := range te.triggers {
-		// Optimization: skip regex if literal prefix doesn't match
-		if t.LiteralPrefix != "" {
-			// We use strings.Contains for general matches, or could use HasPrefix if ^ is present
-			// Actually LiteralPrefix() from regexp package returns prefix that MUST match at start
-			// unless we have specific flags.
-			// For simplicity and safety, we just use a fast string check.
-			if !containsFast(line, t.LiteralPrefix) {
-				continue
-			}
-		}
+	te.triggersMux.RLock()
+	snapshot := make([]Trigger, len(te.triggers))
+	copy(snapshot, te.triggers)
+	te.triggersMux.RUnlock()
 
+	for _, t := range snapshot {
+		if t.LiteralPrefix != "" && !containsFast(line, t.LiteralPrefix) {
+			continue
+		}
 		patternKey := t.Pattern.String()
 
-		// Check cooldown for loop prevention
 		te.lastFiredMux.Lock()
 		lastTime, exists := te.lastFired[patternKey]
 		if exists && now.Sub(lastTime) < MinTriggerInterval {
-			// Trigger is on cooldown, skip it
 			te.lastFiredMux.Unlock()
 			continue
 		}
 		te.lastFiredMux.Unlock()
 
-		// Find match indices for expansion
 		loc := t.Pattern.FindStringSubmatchIndex(line)
 		if loc != nil {
-			// Expand the response template with captured groups
-			// ExpandString appends to the first arg, so we pass nil to start fresh
 			expanded := t.Pattern.ExpandString(nil, t.Response, line, loc)
 			response := string(expanded)
 
-			// Update last fired time
 			te.lastFiredMux.Lock()
 			te.lastFired[patternKey] = now
 			te.lastFiredMux.Unlock()
@@ -117,9 +109,10 @@ func (te *TriggerEngine) CheckLine(line string) []string {
 
 // RemoveTrigger removes a trigger by its exact pattern string.
 func (te *TriggerEngine) RemoveTrigger(pattern string) bool {
+	te.triggersMux.Lock()
+	defer te.triggersMux.Unlock()
 	for i, t := range te.triggers {
 		if t.Pattern.String() == pattern {
-			// Remove element
 			te.triggers = append(te.triggers[:i], te.triggers[i+1:]...)
 			return true
 		}
@@ -129,7 +122,8 @@ func (te *TriggerEngine) RemoveTrigger(pattern string) bool {
 
 // ListTriggers returns all registered triggers.
 func (te *TriggerEngine) ListTriggers() []Trigger {
-	// Return a copy to avoid mutation
+	te.triggersMux.RLock()
+	defer te.triggersMux.RUnlock()
 	list := make([]Trigger, len(te.triggers))
 	copy(list, te.triggers)
 	return list
@@ -137,12 +131,17 @@ func (te *TriggerEngine) ListTriggers() []Trigger {
 
 // TriggerCount returns the number of registered triggers.
 func (te *TriggerEngine) TriggerCount() int {
+	te.triggersMux.RLock()
+	defer te.triggersMux.RUnlock()
 	return len(te.triggers)
 }
 
 // ClearTriggers removes all registered triggers.
 func (te *TriggerEngine) ClearTriggers() {
+	te.triggersMux.Lock()
 	te.triggers = make([]Trigger, 0)
+	te.triggersMux.Unlock()
+
 	te.lastFiredMux.Lock()
 	te.lastFired = make(map[string]time.Time)
 	te.lastFiredMux.Unlock()

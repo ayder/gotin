@@ -1,6 +1,7 @@
 package logic
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -393,4 +394,28 @@ func TestProcessor_ANSIStripping(t *testing.T) {
 	if sentResponse != "Thanks" {
 		t.Errorf("Trigger should fire on ANSI-stripped text, got %q", sentResponse)
 	}
+}
+
+func TestTriggerEngine_ConcurrentAddAndCheck(t *testing.T) {
+	te := NewTriggerEngine(func(string) {})
+	_ = te.AddTrigger("^hello", "hi")
+
+	done := make(chan struct{})
+	// Reader
+	go func() {
+		for i := 0; i < 1000; i++ {
+			te.CheckLine("hello world")
+		}
+		done <- struct{}{}
+	}()
+	// Writer
+	go func() {
+		for i := 0; i < 1000; i++ {
+			_ = te.AddTrigger("^ping"+fmt.Sprint(i), "pong")
+			te.RemoveTrigger("^ping" + fmt.Sprint(i))
+		}
+		done <- struct{}{}
+	}()
+	<-done
+	<-done
 }
