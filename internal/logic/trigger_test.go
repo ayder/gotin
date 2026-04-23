@@ -1,7 +1,7 @@
 package logic
 
 import (
-	"fmt"
+	"strconv"
 	"testing"
 )
 
@@ -411,11 +411,50 @@ func TestTriggerEngine_ConcurrentAddAndCheck(t *testing.T) {
 	// Writer
 	go func() {
 		for i := 0; i < 1000; i++ {
-			_ = te.AddTrigger("^ping"+fmt.Sprint(i), "pong")
-			te.RemoveTrigger("^ping" + fmt.Sprint(i))
+			_ = te.AddTrigger("^ping"+strconv.Itoa(i), "pong")
+			te.RemoveTrigger("^ping" + strconv.Itoa(i))
 		}
 		done <- struct{}{}
 	}()
+	<-done
+	<-done
+	if te.TriggerCount() != 1 {
+		t.Errorf("expected initial ^hello trigger to survive, got TriggerCount=%d", te.TriggerCount())
+	}
+}
+
+func TestTriggerEngine_ConcurrentReadersAndClear(t *testing.T) {
+	te := NewTriggerEngine(func(string) {})
+	for i := 0; i < 20; i++ {
+		_ = te.AddTrigger("^evt"+strconv.Itoa(i), "ok")
+	}
+
+	done := make(chan struct{}, 3)
+
+	// Reader 1: ListTriggers
+	go func() {
+		for i := 0; i < 500; i++ {
+			_ = te.ListTriggers()
+		}
+		done <- struct{}{}
+	}()
+	// Reader 2: TriggerCount
+	go func() {
+		for i := 0; i < 500; i++ {
+			_ = te.TriggerCount()
+		}
+		done <- struct{}{}
+	}()
+	// Writer: ClearTriggers and re-seed
+	go func() {
+		for i := 0; i < 100; i++ {
+			te.ClearTriggers()
+			_ = te.AddTrigger("^seed", "ok")
+		}
+		done <- struct{}{}
+	}()
+
+	<-done
 	<-done
 	<-done
 }
