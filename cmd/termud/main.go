@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"dmud/internal/config"
 	"dmud/internal/input"
@@ -140,23 +141,23 @@ func main() {
 	}
 
 	// 7. Network State
-	var client *network.Client
+	var client atomic.Pointer[network.Client]
 
 	// Resize callback: update NAWS when terminal size changes
 	model.SetResizeCallback(func(w, h int) {
-		if client != nil {
-			client.SetWindowSize(w, h)
-			client.SendNAWS()
+		if c := client.Load(); c != nil {
+			c.SetWindowSize(w, h)
+			c.SendNAWS()
 		}
 	})
 
 	// Shared Logic Components
 	sendToNet := func(msg string) {
-		if client != nil {
+		if c := client.Load(); c != nil {
 			if !strings.HasSuffix(msg, "\r\n") {
 				msg += "\r\n"
 			}
-			client.Send([]byte(msg))
+			c.Send([]byte(msg))
 		}
 	}
 	te := logic.NewTriggerEngine(sendToNet)
@@ -203,21 +204,22 @@ func main() {
 
 	// Helper to connect
 	connect := func(h string, port int) {
-		if client != nil {
-			client.Close()
-		}
+		old := client.Load()
 
-		p.Send(ui.StatusMsg{Message: fmt.Sprintf("Connecting to %s:%d...\n", h, port)})
+		trySendUI(ui.StatusMsg{Message: fmt.Sprintf("Connecting to %s:%d...\n", h, port)})
 
 		c, err := network.Connect(h, port)
 		if err != nil {
-			p.Send(ui.StatusMsg{Message: fmt.Sprintf("Connection failed: %v\n", err)})
+			trySendUI(ui.StatusMsg{Message: fmt.Sprintf("Connection failed: %v\n", err)})
 			return
 		}
 
-		client = c
-		client.SetDebug(*debug)
-		client.SetWindowSize(model.Width(), model.Height())
+		c.SetDebug(*debug)
+		c.SetWindowSize(model.Width(), model.Height())
+		client.Store(c)
+		if old != nil {
+			old.Close()
+		}
 
 		// --- Logic Layer Wiring ---
 		// 1. Buffer
@@ -228,11 +230,11 @@ func main() {
 		proc := logic.NewProcessor(te)
 
 		// Setup callbacks
-		client.SetEchoCallback(func(enabled bool) {
+		c.SetEchoCallback(func(enabled bool) {
 			trySendUI(ui.SetLocalEchoMsg{LocalEcho: enabled})
 		})
 
-		client.SetDataCallback(func(data string) {
+		c.SetDataCallback(func(data string) {
 			// Decoupled UI delivery
 			trySendUI(ui.NetworkDataMsg{Data: data})
 
@@ -265,8 +267,8 @@ func main() {
 			p.Send(ui.StatusMsg{Message: "\nConnection closed.\n"})
 		}()
 
-		p.Send(ui.StatusMsg{Message: "Connected!\n"})
-		client.SendNAWS() // Send initial NAWS on connect
+		trySendUI(ui.StatusMsg{Message: "Connected!\n"})
+		c.SendNAWS() // Send initial NAWS on connect
 
 		// Update Config
 		cfg.LastHost = h
@@ -602,14 +604,14 @@ func main() {
 				}
 			}
 
-			if client != nil {
+			if c := client.Load(); c != nil {
 				// Append \r\n if needed, standard Telnet requires CRLF
 				if !strings.HasSuffix(text, "\r\n") {
 					text += "\r\n"
 				}
-				client.Send([]byte(text))
+				c.Send([]byte(text))
 			} else {
-				p.Send(ui.StatusMsg{Message: "Not connected. Type /connect <host> <port> to connect.\n"})
+				trySendUI(ui.StatusMsg{Message: "Not connected. Type /connect <host> <port> to connect.\n"})
 			}
 		}
 	}()
