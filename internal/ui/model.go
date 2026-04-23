@@ -284,9 +284,6 @@ func (m *Model) appendContent(text string) {
 	distFromBottom := m.viewport.TotalLineCount() - (m.viewport.YOffset + m.viewport.Height)
 	shouldAutoScroll := distFromBottom <= 1
 
-	// Sanitize input: remove all carriage returns (CR / \r)
-	text = strings.ReplaceAll(text, "\r", "")
-
 	// If m.content is empty, start it.
 	if len(m.content) == 0 {
 		m.content = []string{""}
