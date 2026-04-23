@@ -1,7 +1,9 @@
 package network
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"time"
@@ -12,14 +14,17 @@ import (
 type EchoCallback func(localEcho bool)
 
 // Client wraps a TCP connection to a MUD server.
-// Client wraps a TCP connection to a MUD server.
 type Client struct {
-	conn         net.Conn
-	decoder      *Decoder
-	debug        bool
-	serverEcho   bool              // true when server is handling echo (client should hide input)
-	echoCallback EchoCallback      // called when echo state changes
-	dataCallback func(data string) // called when new data arrives
+	conn           net.Conn
+	reader         *bufio.Reader
+	decoder        *Decoder
+	debug          bool
+	serverEcho     bool              // true when server is handling echo (client should hide input)
+	echoCallback   EchoCallback      // called when echo state changes
+	dataCallback   func(data string) // called when new data arrives
+	windowWidth    int               // terminal width for NAWS
+	windowHeight   int               // terminal height for NAWS
+	pending        []byte            // pending bytes from incomplete IAC sequences
 }
 
 // SetDebug enables or disables debug logging.
@@ -46,18 +51,14 @@ func (c *Client) Send(data []byte) error {
 // ProcessIAC processes Telnet IAC sequences from the input.
 // It returns:
 // - cleanData: the input with IAC sequences removed
-// - responses: negotiation responses to send back (WONT for DO, DONT for WILL)
-//
-// It handles:
-// - IAC followed by DO/DONT/WILL/WONT + option byte (3 bytes total)
-// - IAC followed by SB ... SE (subnegotiation, variable length)
-// - IAC IAC (escaped 0xFF, outputs single 0xFF)
-// - IAC followed by other commands (2 bytes total)
-//
-// Special handling for ECHO option:
-// - WILL ECHO: Server will handle echo, respond with DO ECHO, disable local echo
-// - WONT ECHO: Server stops echoing, respond with DONT ECHO, enable local echo
+// - responses: negotiation responses to send back
 func (c *Client) ProcessIAC(data []byte) (cleanData []byte, responses []byte) {
+	// Prepend any pending data from previous reads
+	if len(c.pending) > 0 {
+		data = append(c.pending, data...)
+		c.pending = nil
+	}
+
 	if len(data) == 0 {
 		return data, nil
 	}
@@ -67,106 +68,172 @@ func (c *Client) ProcessIAC(data []byte) (cleanData []byte, responses []byte) {
 	i := 0
 
 	for i < len(data) {
-		if data[i] != IAC {
-			// Regular byte, keep it
-			result = append(result, data[i])
-			i++
-			continue
-		}
-
-		// Found IAC, need at least one more byte
-		if i+1 >= len(data) {
-			// IAC at end of buffer, discard it (incomplete sequence)
-			break
-		}
-
-		cmd := data[i+1]
-
-		switch cmd {
-		case IAC:
-			// IAC IAC = escaped 0xFF, output single 0xFF
-			result = append(result, IAC)
-			i += 2
-
-		case DO:
-			// Server asks us to DO something, we refuse with WONT
-			if i+2 < len(data) {
-				option := data[i+2]
-				respBuf = append(respBuf, IAC, WONT, option)
-				i += 3
-			} else {
-				i = len(data)
+		b := data[i]
+		if b == IAC {
+			// Found IAC, need at least one more byte
+			if i+1 >= len(data) {
+				// IAC at end of buffer, save for next read
+				c.pending = data[i:]
+				break
 			}
 
-		case WILL:
-			// Server says it WILL do something
-			if i+2 < len(data) {
-				option := data[i+2]
-				if option == ECHO {
-					// Server will handle echo - accept and disable local echo
-					respBuf = append(respBuf, IAC, DO, option)
-					if !c.serverEcho {
-						c.serverEcho = true
-						if c.echoCallback != nil {
-							c.echoCallback(false) // disable local echo
+			cmd := data[i+1]
+			switch cmd {
+			case IAC:
+				// IAC IAC = escaped 0xFF, output single 0xFF
+				result = append(result, IAC)
+				i += 2
+				continue
+			case DO, WILL, WONT, DONT:
+				if i+2 < len(data) {
+					option := data[i+2]
+					c.handleNegotiation(cmd, option, &respBuf)
+					i += 3
+				} else {
+					c.pending = data[i:]
+					return result, respBuf
+				}
+				continue
+			case SB:
+				// Subnegotiation: IAC SB <option> ... IAC SE
+				if i+2 < len(data) {
+					option := data[i+2]
+					foundSE := false
+					j := i + 3
+					for j < len(data) {
+						if data[j] == IAC && j+1 < len(data) && data[j+1] == SE {
+							foundSE = true
+							break
 						}
+						j++
+					}
+					if foundSE {
+						subData := c.unescapeSubneg(data[i+3 : j])
+						c.handleSubnegotiation(option, subData, &respBuf)
+						i = j + 2
+					} else {
+						c.pending = data[i:]
+						return result, respBuf
 					}
 				} else {
-					// Refuse other options with DONT
-					respBuf = append(respBuf, IAC, DONT, option)
+					c.pending = data[i:]
+					return result, respBuf
 				}
-				i += 3
-			} else {
-				i = len(data)
+				continue
+			default:
+				i += 2
+				continue
 			}
+		}
 
-		case WONT:
-			// Server says it WONT do something
-			if i+2 < len(data) {
-				option := data[i+2]
-				if option == ECHO {
-					// Server stops echoing - respond and enable local echo
-					respBuf = append(respBuf, IAC, DONT, option)
-					if c.serverEcho {
-						c.serverEcho = false
-						if c.echoCallback != nil {
-							c.echoCallback(true) // enable local echo
-						}
-					}
+		// Handle CR NUL / CR LF normalization
+		if b == '\r' {
+			if i+1 < len(data) {
+				next := data[i+1]
+				if next == '\n' {
+					// CR LF -> \n
+					result = append(result, '\n')
+					i += 2
+				} else if next == 0 {
+					// CR NUL -> CR
+					result = append(result, '\r')
+					i += 2
+				} else {
+					// Stray CR, keep it or normalize? RFC says CR should be followed by LF or NUL.
+					// We'll keep it for robustness.
+					result = append(result, '\r')
+					i++
 				}
-				// For other options, just acknowledge by not responding
-				i += 3
 			} else {
-				i = len(data)
+				// CR at end of buffer, wait for next byte to normalize
+				c.pending = data[i:]
+				break
 			}
-
-		case DONT:
-			// Server refuses, we just acknowledge by ignoring
-			if i+2 < len(data) {
-				i += 3
-			} else {
-				i = len(data)
-			}
-
-		case SB:
-			// Subnegotiation: IAC SB ... IAC SE
-			// Skip until we find IAC SE
-			i += 2 // Skip IAC SB
-			for i < len(data) {
-				if data[i] == IAC && i+1 < len(data) && data[i+1] == SE {
-					i += 2 // Skip IAC SE
-					break
-				}
-				i++
-			}
-
-		default:
-			// Other 2-byte commands (like IAC NOP, IAC GA, etc.)
-			i += 2
+		} else if b == 0 {
+			// Drop stray NUL bytes
+			i++
+		} else {
+			// Regular byte
+			result = append(result, b)
+			i++
 		}
 	}
 
 	return result, respBuf
+}
+
+// handleNegotiation handles DO/DONT/WILL/WONT commands.
+func (c *Client) handleNegotiation(cmd, option byte, respBuf *[]byte) {
+	switch cmd {
+	case WILL:
+		if option == ECHO {
+			*respBuf = append(*respBuf, IAC, DO, option)
+			if !c.serverEcho {
+				c.serverEcho = true
+				if c.echoCallback != nil {
+					c.echoCallback(false)
+				}
+			}
+		} else if option == SGA {
+			*respBuf = append(*respBuf, IAC, DO, option)
+		} else {
+			*respBuf = append(*respBuf, IAC, DONT, option)
+		}
+	case WONT:
+		if option == ECHO {
+			*respBuf = append(*respBuf, IAC, DONT, option)
+			if c.serverEcho {
+				c.serverEcho = false
+				if c.echoCallback != nil {
+					c.echoCallback(true)
+				}
+			}
+		}
+	case DO:
+		if option == NAWS || option == SGA {
+			*respBuf = append(*respBuf, IAC, WILL, option)
+		} else {
+			*respBuf = append(*respBuf, IAC, WONT, option)
+		}
+	case DONT:
+		// Acknowledge by silence or WONT if we were WILLing
+	}
+}
+
+// handleSubnegotiation handles SB ... SE sequences.
+func (c *Client) handleSubnegotiation(option byte, data []byte, respBuf *[]byte) {
+	switch option {
+	case TTYPE:
+		if len(data) > 0 && data[0] == TTYPE_SEND {
+			*respBuf = append(*respBuf, c.buildTTYPE()...)
+		}
+	}
+}
+
+// unescapeSubneg removes IAC-escaping from subnegotiation data.
+func (c *Client) unescapeSubneg(data []byte) []byte {
+	result := make([]byte, 0, len(data))
+	for i := 0; i < len(data); i++ {
+		if data[i] == IAC && i+1 < len(data) && data[i+1] == IAC {
+			result = append(result, IAC)
+			i++
+		} else {
+			result = append(result, data[i])
+		}
+	}
+	return result
+}
+
+// escapeIAC doubles any IAC (0xFF) bytes in the data for Telnet transmission.
+func (c *Client) escapeIAC(data []byte) []byte {
+	result := make([]byte, 0, len(data))
+	for _, b := range data {
+		result = append(result, b)
+		if b == IAC {
+			result = append(result, IAC)
+		}
+	}
+	return result
 }
 
 // Connect establishes a TCP connection to the specified host and port.
@@ -178,6 +245,7 @@ func Connect(host string, port int) (*Client, error) {
 	}
 	return &Client{
 		conn:    conn,
+		reader:  bufio.NewReader(conn),
 		decoder: NewDecoder(),
 	}, nil
 }
@@ -185,13 +253,21 @@ func Connect(host string, port int) (*Client, error) {
 // ReadLoop continuously reads data from the connection.
 // It sends decoded text to the dataCallback if set, or prints to stdout.
 func (c *Client) ReadLoop() {
-	buffer := make([]byte, 1024)
+	buffer := make([]byte, 4096)
 	for {
-		n, err := c.conn.Read(buffer)
+		// Set read deadline to handle stale connections
+		c.conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
+
+		n, err := c.reader.Read(buffer)
 		if err != nil {
-			// Signal connection closed? For now just handle error/close
+			if err == io.EOF {
+				// Clean disconnect
+				return
+			}
+			// Other network errors
 			return
 		}
+
 		if n > 0 {
 			// Process IAC sequences and get negotiation responses
 			clean, responses := c.ProcessIAC(buffer[:n])
@@ -201,7 +277,10 @@ func (c *Client) ReadLoop() {
 				if c.debug {
 					c.logNegotiations(responses)
 				}
-				c.Send(responses)
+				if err := c.Send(responses); err != nil {
+					// Failed to send negotiation response, likely connection lost
+					return
+				}
 			}
 
 			if len(clean) > 0 {
@@ -218,8 +297,11 @@ func (c *Client) ReadLoop() {
 
 // logNegotiations logs the negotiation responses being sent.
 func (c *Client) logNegotiations(responses []byte) {
-	for i := 0; i+2 < len(responses); i += 3 {
+	for i := 0; i+2 <= len(responses); {
 		if responses[i] == IAC {
+			if i+2 >= len(responses) {
+				break
+			}
 			cmd := responses[i+1]
 			option := responses[i+2]
 			cmdName := ""
@@ -234,11 +316,63 @@ func (c *Client) logNegotiations(responses []byte) {
 				cmdName = "DONT"
 			}
 			fmt.Printf("[DEBUG] Sent: %s %d\n", cmdName, option)
+			i += 3
+		} else {
+			i++
 		}
+	}
+}
+
+// SetWindowSize sets the terminal dimensions for NAWS reporting.
+func (c *Client) SetWindowSize(width, height int) {
+	c.windowWidth = width
+	c.windowHeight = height
+}
+
+// buildTTYPE returns a TTYPE subnegotiation response with xterm-256color.
+func (c *Client) buildTTYPE() []byte {
+	termType := []byte("xterm-256color")
+	result := make([]byte, 0, 6+len(termType))
+	result = append(result, IAC, SB, TTYPE, TTYPE_IS)
+	result = append(result, c.escapeIAC(termType)...)
+	result = append(result, IAC, SE)
+	return result
+}
+
+// buildNAWS returns a NAWS subnegotiation with the current window size.
+func (c *Client) buildNAWS() []byte {
+	w := c.windowWidth
+	if w <= 0 {
+		w = 80
+	}
+	h := c.windowHeight
+	if h <= 0 {
+		h = 24
+	}
+	widthHigh := byte(w >> 8)
+	widthLow := byte(w & 0xFF)
+	heightHigh := byte(h >> 8)
+	heightLow := byte(h & 0xFF)
+
+	payload := []byte{widthHigh, widthLow, heightHigh, heightLow}
+	result := make([]byte, 0, 3+len(payload)*2+2)
+	result = append(result, IAC, SB, NAWS)
+	result = append(result, c.escapeIAC(payload)...)
+	result = append(result, IAC, SE)
+	return result
+}
+
+// SendNAWS sends the current window size to the server via NAWS subnegotiation.
+func (c *Client) SendNAWS() {
+	if c.conn != nil {
+		c.Send(c.buildNAWS())
 	}
 }
 
 // Close closes the underlying connection.
 func (c *Client) Close() error {
+	if c.conn == nil {
+		return nil
+	}
 	return c.conn.Close()
 }

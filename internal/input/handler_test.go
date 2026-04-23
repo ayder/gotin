@@ -29,7 +29,7 @@ func TestHandleInput_LocalCommand(t *testing.T) {
 			name:       "help command",
 			input:      "/help",
 			wantLocal:  true,
-			wantAction: "",
+			wantAction: "show_help",
 		},
 		{
 			name:       "connect command with args",
@@ -144,8 +144,8 @@ func TestHandleInput_HelpResponse(t *testing.T) {
 	if !result.Handled {
 		t.Error("Expected /help to be handled")
 	}
-	if result.Response == "" {
-		t.Error("Expected /help to have a response")
+	if result.Action != "show_help" {
+		t.Errorf("Expected /help Action to be 'show_help', got %q", result.Action)
 	}
 }
 

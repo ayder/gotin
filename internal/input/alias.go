@@ -56,6 +56,11 @@ func (am *AliasManager) Delete(trigger string) bool {
 	return false
 }
 
+// Clear removes all aliases.
+func (am *AliasManager) Clear() {
+	am.aliases = make(map[string]*Alias)
+}
+
 // List returns all defined aliases as a map of pattern -> expansion for display/persistence.
 func (am *AliasManager) List() map[string]string {
 	result := make(map[string]string, len(am.aliases))

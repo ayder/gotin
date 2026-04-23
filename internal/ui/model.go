@@ -28,6 +28,11 @@ type SendCommandMsg struct {
 	Command string
 }
 
+// StatusMsg is used to update the single-line command status in the UI border.
+type StatusMsg struct {
+	Message string
+}
+
 // LocalCommandMsg is sent when a local command is processed.
 type LocalCommandMsg struct {
 	Result input.CommandResult
@@ -43,10 +48,15 @@ type Model struct {
 	width          int
 	height         int
 	content        []string // stores all lines displayed in viewport
+	statusMsg      string   // stores current status for border title
+	showHelp       bool     // whether the help widget is visible
 
 	// Channels for command routing
 	SendChan  chan<- string              // Channel to send commands to server
 	LocalChan chan<- input.CommandResult // Channel for local command actions
+
+	// Callbacks
+	resizeCallback func(width, height int) // called when terminal is resized
 }
 
 // inputHeight is the fixed height for the input area (input line + border).
@@ -85,6 +95,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.showHelp {
+			if msg.Type == tea.KeyCtrlC {
+				return m, tea.Quit
+			}
+			m.showHelp = false
+			return m, nil
+		}
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
@@ -119,14 +136,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for _, result := range results {
 				if result.IsLocal {
 					// Local command - display response and send action via channel
+					if result.Action == "show_help" {
+						m.showHelp = true
+						continue
+					}
 					if result.Response != "" {
-						m.appendContent(result.Response + "\n")
+						trimmed := strings.TrimSpace(result.Response)
+						if strings.Contains(trimmed, "\n") {
+							m.appendContent(result.Response + "\n")
+						} else {
+							m.statusMsg = trimmed
+						}
 					}
 					// Send action to local command channel (non-blocking)
 					if m.LocalChan != nil && result.Action != "" {
-						go func(r input.CommandResult) {
-							m.LocalChan <- r
-						}(result)
+						select {
+						case m.LocalChan <- result:
+						default:
+							// Buffer full, drop or log (should not happen with 128 buffer)
+						}
 					}
 				} else if result.ServerText != "" || value == "" {
 					// Server command - send to server (or empty if value was "")
@@ -136,9 +164,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if value == "" {
 							textToSend = ""
 						}
-						go func(cmd string) {
-							m.SendChan <- cmd
-						}(textToSend)
+						select {
+						case m.SendChan <- textToSend:
+						default:
+							// Buffer full
+						}
 					}
 				}
 			}
@@ -190,6 +220,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case StatusMsg:
+		trimmed := strings.TrimSpace(msg.Message)
+		if strings.Contains(trimmed, "\n") {
+			m.appendContent(msg.Message)
+		} else {
+			m.statusMsg = trimmed
+		}
+		return m, nil
+
 	case NetworkDataMsg:
 		m.appendContent(msg.Data)
 		return m, nil
@@ -212,7 +251,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Update text input width
-		m.textinput.Width = m.width - 2
+		m.textinput.Width = m.width - 5
+
+		// Notify resize callback so NAWS can update the server
+		if m.resizeCallback != nil {
+			m.resizeCallback(m.width, m.height)
+		}
 	}
 
 	// Handle viewport updates
@@ -237,8 +281,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // It handles partial lines by appending to the last line if needed.
 func (m *Model) appendContent(text string) {
 	// Calculate distance from bottom before update
-	// Standard AtBottom() can be strict. We allow a small buffer (1 line)
-	// to account for partial updates or off-by-one rendering issues.
 	distFromBottom := m.viewport.TotalLineCount() - (m.viewport.YOffset + m.viewport.Height)
 	shouldAutoScroll := distFromBottom <= 1
 
@@ -252,14 +294,23 @@ func (m *Model) appendContent(text string) {
 
 	parts := strings.Split(text, "\n")
 
-	// Pending part
+	// Update the current last line with the first part of new text
 	lastIdx := len(m.content) - 1
 	m.content[lastIdx] += parts[0]
 
+	// Add any subsequent parts as new lines
 	for i := 1; i < len(parts); i++ {
 		m.content = append(m.content, parts[i])
 	}
 
+	// Optimization: limit total history to prevent performance degradation over time
+	const maxHistory = 5000
+	if len(m.content) > maxHistory {
+		m.content = m.content[len(m.content)-maxHistory:]
+	}
+
+	// Update viewport content - this is still O(N) where N is history size,
+	// but we've optimized the string manipulation before this point.
 	m.viewport.SetContent(strings.Join(m.content, "\n"))
 
 	// Auto-scroll if we were near the bottom
@@ -274,24 +325,88 @@ func (m Model) View() string {
 		return "Initializing..."
 	}
 
+	if m.showHelp {
+		return m.renderHelpWidget()
+	}
+
 	// Style for the viewport (no border)
 	viewportStyle := lipgloss.NewStyle().
 		Width(m.width).
 		Height(m.height - inputHeight)
 
 	// Style for the input border
+	border := lipgloss.RoundedBorder()
 	inputStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(border).
+		BorderTop(false).
 		BorderForeground(lipgloss.Color("62")).
 		Width(m.width - 2)
+
+	topBorderWidth := m.width
+	var topBorder strings.Builder
+	topBorder.WriteString(border.TopLeft)
+
+	titleStr := ""
+	if m.statusMsg != "" {
+		titleStr = " " + m.statusMsg + " "
+	}
+
+	titleWidth := lipgloss.Width(titleStr)
+	available := topBorderWidth - 2 - 2 // Space for left/right corners + at least 2 dashes
+
+	if titleWidth > available && available > 0 {
+		if len(titleStr) > available {
+			titleStr = " ..." + titleStr[len(titleStr)-(available-4):]
+			titleWidth = lipgloss.Width(titleStr)
+		}
+	}
+
+	if len(titleStr) > 0 && titleWidth <= available {
+		remaining := topBorderWidth - 2 - titleWidth - 2
+		if remaining > 0 {
+			topBorder.WriteString(strings.Repeat(border.Top, remaining))
+		}
+		topBorder.WriteString(titleStr)
+		topBorder.WriteString(strings.Repeat(border.Top, 2))
+	} else {
+		if topBorderWidth-2 > 0 {
+			topBorder.WriteString(strings.Repeat(border.Top, topBorderWidth-2))
+		}
+	}
+	topBorder.WriteString(border.TopRight)
+
+	topBorderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("62"))
 
 	// Build the view
 	var b strings.Builder
 	b.WriteString(viewportStyle.Render(m.viewport.View()))
 	b.WriteString("\n")
+	b.WriteString(topBorderStyle.Render(topBorder.String()))
+	b.WriteString("\n")
 	b.WriteString(inputStyle.Render(m.textinput.View()))
 
 	return b.String()
+}
+
+// renderHelpWidget renders a centered help widget.
+func (m Model) renderHelpWidget() string {
+	helpWidth := m.width - 4
+	if helpWidth > 78 {
+		helpWidth = 78
+	}
+
+	border := lipgloss.RoundedBorder()
+	widgetStyle := lipgloss.NewStyle().
+		Border(border).
+		BorderForeground(lipgloss.Color("62")).
+		Background(lipgloss.Color("235")).
+		Padding(1, 2).
+		Width(helpWidth)
+
+	helpContent := m.commandHandler.HelpText()
+	widget := widgetStyle.Render(helpContent)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, widget)
 }
 
 // GetAliases returns the current aliases from the command handler.
@@ -302,4 +417,49 @@ func (m Model) GetAliases() map[string]string {
 // SetAliases loads aliases into the command handler.
 func (m *Model) SetAliases(aliases map[string]string) {
 	m.commandHandler.SetAliases(aliases)
+}
+
+// ClearAliases removes all aliases from the command handler.
+func (m *Model) ClearAliases() {
+	m.commandHandler.ClearAliases()
+}
+
+// GetHistory returns the current command history.
+func (m Model) GetHistory() []string {
+	return m.history.Commands()
+}
+
+// LoadHistory loads commands into the history.
+func (m *Model) LoadHistory(commands []string) {
+	m.history.SetCommands(commands)
+}
+
+// GetConnections returns the current connection aliases from the command handler.
+func (m Model) GetConnections() map[string]input.ConnectionAlias {
+	return m.commandHandler.GetConnections()
+}
+
+// SetConnections loads connection aliases into the command handler.
+func (m *Model) SetConnections(connections map[string]input.ConnectionAlias) {
+	m.commandHandler.SetConnections(connections)
+}
+
+// ClearConnections removes all connection aliases from the command handler.
+func (m *Model) ClearConnections() {
+	m.commandHandler.ClearConnections()
+}
+
+// SetResizeCallback sets the callback invoked when the terminal is resized.
+func (m *Model) SetResizeCallback(callback func(width, height int)) {
+	m.resizeCallback = callback
+}
+
+// Width returns the current terminal width.
+func (m Model) Width() int {
+	return m.width
+}
+
+// Height returns the current terminal height.
+func (m Model) Height() int {
+	return m.height
 }

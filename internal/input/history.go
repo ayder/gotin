@@ -74,3 +74,21 @@ func (h *History) Reset() {
 func (h *History) Len() int {
 	return len(h.commands)
 }
+
+// Commands returns a copy of the stored commands.
+func (h *History) Commands() []string {
+	result := make([]string, len(h.commands))
+	copy(result, h.commands)
+	return result
+}
+
+// SetCommands replaces the stored commands.
+func (h *History) SetCommands(commands []string) {
+	h.commands = make([]string, 0, len(commands))
+	for _, cmd := range commands {
+		if cmd != "" {
+			h.commands = append(h.commands, cmd)
+		}
+	}
+	h.index = -1
+}

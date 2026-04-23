@@ -1,11 +1,19 @@
 package input
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
 	"dmud/internal/pkg/parser"
 )
+
+// ConnectionAlias maps a name to a host:port pair for quick connecting.
+type ConnectionAlias struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
+	Auto bool   `json:"auto"`
+}
 
 // parseBraceDelimitedArgs parses brace-delimited arguments from a string.
 // Input: "{pattern} {response}" or "pattern response" (fallback)
@@ -41,13 +49,16 @@ type Handler struct {
 	commands map[string]func(args []string) CommandResult
 	// aliases manages user-defined command aliases.
 	aliases *AliasManager
+	// connections maps names to host:port aliases.
+	connections map[string]ConnectionAlias
 }
 
 // NewHandler creates a new command handler with built-in commands.
 func NewHandler() *Handler {
 	h := &Handler{
-		commands: make(map[string]func(args []string) CommandResult),
-		aliases:  NewAliasManager(),
+		commands:    make(map[string]func(args []string) CommandResult),
+		aliases:     NewAliasManager(),
+		connections: make(map[string]ConnectionAlias),
 	}
 
 	// Register built-in commands
@@ -62,6 +73,9 @@ func NewHandler() *Handler {
 	h.commands["untrigger"] = h.cmdUntrigger
 	h.commands["triggers"] = h.cmdTriggers
 	h.commands["map"] = h.cmdMap
+	h.commands["save"] = h.cmdSave
+	h.commands["load"] = h.cmdLoad
+	h.commands["connections"] = h.cmdConnections
 
 	return h
 }
@@ -202,30 +216,55 @@ func (h *Handler) cmdConnect(args []string) CommandResult {
 	}
 }
 
-// cmdHelp handles the /help command.
-func (h *Handler) cmdHelp(args []string) CommandResult {
-	helpText := `Available commands:
-  /help                              - Show this help message
+// HelpText returns the full help text for display in the help widget.
+func (h *Handler) HelpText() string {
+	return `Available commands:
+  /help                              - Show this help widget
   /connect <host> <port>             - Connect to a MUD server
+  /connect <alias>                   - Connect using a connection alias
   /quit or /q                        - Exit the application
-  /alias {pattern} {expansion}       - Create an alias
+  /alias {pattern} {expansion}       - Create a command alias
     Examples:
       /alias {k $1} {kill $1; skin corpse}
       /alias {setup} {stand; wear all; look}
-      /alias {hi $1} {say Hello $1; smile $1}
-  /unalias <trigger>                 - Remove an alias by its trigger word
-  /aliases                           - List all aliases
+  /alias connection <name> <host> <port> [auto]
+                                     - Create a connection alias
+  /unalias <trigger>                 - Remove a command alias
+  /unalias connection <name>         - Remove a connection alias
+  /aliases                           - List all command aliases
+  /connections                       - List all connection aliases
   /trigger {pattern} {response}      - Create a trigger
-    Example: /trigger {^Greetings (.*)} {say Hello $1}
   /untrigger {pattern}               - Remove a trigger
   /triggers                          - List all triggers
+  /save [filename]                   - Save aliases, triggers and connections
+  /load [filename]                   - Load aliases, triggers and connections
+
+  /map <subcommand> [args...]        - Map management commands
+    Subcommands:
+      create [filename]              - Initialize a new map
+      paths [directions]             - Show or set path directions
+      dig <dir> <action>             - Create a room in a direction
+      undo                           - Undo last map action
+      delete <room>                  - Delete a room
+      goto <room>                    - Teleport to a room
+      link <dir> <room>              - Link a direction to a room
+      name <name>                    - Rename current room
+      search <query>                 - Search for a room
+      show [scope|radius]            - Show map around current room
+      info                           - Show current room info
+      start [room]                   - Start auto-mapping
+      stop                           - Stop auto-mapping
+      exit                           - Save map and stop auto-mapping
 
 All other input is sent to the connected server.`
+}
 
+// cmdHelp handles the /help command.
+func (h *Handler) cmdHelp(args []string) CommandResult {
 	return CommandResult{
-		IsLocal:  true,
-		Handled:  true,
-		Response: helpText,
+		IsLocal: true,
+		Handled: true,
+		Action:  "show_help",
 	}
 }
 
@@ -253,6 +292,46 @@ func (h *Handler) cmdAlias(args []string) CommandResult {
 	}
 
 	pattern := parsed[0]
+
+	// Check for connection alias syntax: /alias connection <name> <host> <port> [auto]
+	if pattern == "connection" {
+		if len(parsed) < 4 {
+			return CommandResult{
+				IsLocal:  true,
+				Handled:  false,
+				Response: "Usage: /alias connection <name> <host> <port> [auto]\nExample: /alias connection t2t t2tmud.org 9999 auto",
+			}
+		}
+		name := parsed[1]
+		host := parsed[2]
+		port, err := strconv.Atoi(parsed[3])
+		if err != nil || port < 1 || port > 65535 {
+			return CommandResult{
+				IsLocal:  true,
+				Handled:  false,
+				Response: "Invalid port: " + parsed[3],
+			}
+		}
+		auto := false
+		if len(parsed) >= 5 && parsed[4] == "auto" {
+			auto = true
+		}
+		h.connections[name] = ConnectionAlias{
+			Host: host,
+			Port: port,
+			Auto: auto,
+		}
+		autoStr := ""
+		if auto {
+			autoStr = " (auto)"
+		}
+		return CommandResult{
+			IsLocal:  true,
+			Handled:  true,
+			Response: fmt.Sprintf("Connection alias set: %s -> %s:%d%s", name, host, port, autoStr),
+		}
+	}
+
 	expansion := parsed[1]
 
 	h.aliases.Set(pattern, expansion)
@@ -270,12 +349,31 @@ func (h *Handler) cmdUnalias(args []string) CommandResult {
 		return CommandResult{
 			IsLocal:  true,
 			Handled:  false,
-			Response: "Usage: /unalias <trigger>",
+			Response: "Usage: /unalias <trigger>\n       /unalias connection <name>",
 		}
 	}
 
 	// The trigger is the first word of the pattern
 	trigger := args[0]
+
+	// Check for connection alias removal: /unalias connection <name>
+	if strings.HasPrefix(trigger, "connection ") {
+		name := strings.TrimSpace(strings.TrimPrefix(trigger, "connection"))
+		if _, ok := h.connections[name]; ok {
+			delete(h.connections, name)
+			return CommandResult{
+				IsLocal:  true,
+				Handled:  true,
+				Response: "Connection alias removed: " + name,
+			}
+		}
+		return CommandResult{
+			IsLocal:  true,
+			Handled:  false,
+			Response: "Connection alias not found: " + name,
+		}
+	}
+
 	if h.aliases.Delete(trigger) {
 		return CommandResult{
 			IsLocal:  true,
@@ -325,6 +423,59 @@ func (h *Handler) GetAliases() map[string]string {
 func (h *Handler) SetAliases(aliases map[string]string) {
 	for pattern, expansion := range aliases {
 		h.aliases.Set(pattern, expansion)
+	}
+}
+
+// ClearAliases removes all aliases.
+func (h *Handler) ClearAliases() {
+	h.aliases.Clear()
+}
+
+// GetConnections returns all defined connection aliases.
+func (h *Handler) GetConnections() map[string]ConnectionAlias {
+	result := make(map[string]ConnectionAlias, len(h.connections))
+	for k, v := range h.connections {
+		result[k] = v
+	}
+	return result
+}
+
+// SetConnections loads connection aliases from a map.
+func (h *Handler) SetConnections(connections map[string]ConnectionAlias) {
+	for name, ca := range connections {
+		h.connections[name] = ca
+	}
+}
+
+// ClearConnections removes all connection aliases.
+func (h *Handler) ClearConnections() {
+	h.connections = make(map[string]ConnectionAlias)
+}
+
+// cmdConnections handles the /connections command.
+func (h *Handler) cmdConnections(args []string) CommandResult {
+	if len(h.connections) == 0 {
+		return CommandResult{
+			IsLocal:  true,
+			Handled:  true,
+			Response: "No connection aliases defined. Use /alias connection <name> <host> <port> [auto] to create one.",
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("Connection aliases:\n")
+	for name, ca := range h.connections {
+		autoStr := ""
+		if ca.Auto {
+			autoStr = " [auto]"
+		}
+		sb.WriteString(fmt.Sprintf("  %s -> %s:%d%s\n", name, ca.Host, ca.Port, autoStr))
+	}
+
+	return CommandResult{
+		IsLocal:  true,
+		Handled:  true,
+		Response: strings.TrimSuffix(sb.String(), "\n"),
 	}
 }
 
@@ -406,6 +557,42 @@ func (h *Handler) cmdTriggers(args []string) CommandResult {
 		IsLocal: true,
 		Handled: true,
 		Action:  "trigger_list",
+	}
+}
+
+// cmdSave handles the /save [filename] command.
+func (h *Handler) cmdSave(args []string) CommandResult {
+	filename := "termud.json"
+	if len(args) > 0 && args[0] != "" {
+		filename = args[0]
+	}
+
+	return CommandResult{
+		IsLocal:  true,
+		Handled:  true,
+		Response: "Saving aliases and triggers to " + filename + "...",
+		Action:   "save",
+		ActionArgs: map[string]string{
+			"filename": filename,
+		},
+	}
+}
+
+// cmdLoad handles the /load [filename] command.
+func (h *Handler) cmdLoad(args []string) CommandResult {
+	filename := "termud.json"
+	if len(args) > 0 && args[0] != "" {
+		filename = args[0]
+	}
+
+	return CommandResult{
+		IsLocal:  true,
+		Handled:  true,
+		Response: "Loading aliases and triggers from " + filename + "...",
+		Action:   "load",
+		ActionArgs: map[string]string{
+			"filename": filename,
+		},
 	}
 }
 

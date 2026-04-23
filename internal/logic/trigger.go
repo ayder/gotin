@@ -2,9 +2,15 @@ package logic
 
 import (
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 )
+
+// containsFast provides a fast check if a literal string is present in the line.
+func containsFast(line, literal string) bool {
+	return strings.Contains(line, literal)
+}
 
 // MinTriggerInterval is the minimum time between consecutive firings of the same trigger.
 // This prevents infinite loops where a trigger's response triggers itself.
@@ -13,8 +19,9 @@ const MinTriggerInterval = 200 * time.Millisecond
 // Trigger represents a pattern-response pair.
 // When the Pattern matches incoming text, Response is sent to the server.
 type Trigger struct {
-	Pattern  *regexp.Regexp
-	Response string
+	Pattern       *regexp.Regexp
+	Response      string
+	LiteralPrefix string // Optimization: literal prefix of the regex
 }
 
 // TriggerEngine manages a list of triggers and checks incoming lines against them.
@@ -42,9 +49,14 @@ func (te *TriggerEngine) AddTrigger(pattern string, response string) error {
 	if err != nil {
 		return err
 	}
+
+	// Optimization: check if there's a literal prefix we can use
+	literal, _ := re.LiteralPrefix()
+
 	te.triggers = append(te.triggers, Trigger{
-		Pattern:  re,
-		Response: response,
+		Pattern:       re,
+		Response:      response,
+		LiteralPrefix: literal,
 	})
 	return nil
 }
@@ -58,6 +70,17 @@ func (te *TriggerEngine) CheckLine(line string) []string {
 	now := time.Now()
 
 	for _, t := range te.triggers {
+		// Optimization: skip regex if literal prefix doesn't match
+		if t.LiteralPrefix != "" {
+			// We use strings.Contains for general matches, or could use HasPrefix if ^ is present
+			// Actually LiteralPrefix() from regexp package returns prefix that MUST match at start
+			// unless we have specific flags.
+			// For simplicity and safety, we just use a fast string check.
+			if !containsFast(line, t.LiteralPrefix) {
+				continue
+			}
+		}
+
 		patternKey := t.Pattern.String()
 
 		// Check cooldown for loop prevention
@@ -115,4 +138,12 @@ func (te *TriggerEngine) ListTriggers() []Trigger {
 // TriggerCount returns the number of registered triggers.
 func (te *TriggerEngine) TriggerCount() int {
 	return len(te.triggers)
+}
+
+// ClearTriggers removes all registered triggers.
+func (te *TriggerEngine) ClearTriggers() {
+	te.triggers = make([]Trigger, 0)
+	te.lastFiredMux.Lock()
+	te.lastFired = make(map[string]time.Time)
+	te.lastFiredMux.Unlock()
 }
