@@ -15,16 +15,17 @@ type EchoCallback func(localEcho bool)
 
 // Client wraps a TCP connection to a MUD server.
 type Client struct {
-	conn           net.Conn
-	reader         *bufio.Reader
-	decoder        *Decoder
-	debug          bool
-	serverEcho     bool              // true when server is handling echo (client should hide input)
-	echoCallback   EchoCallback      // called when echo state changes
-	dataCallback   func(data string) // called when new data arrives
-	windowWidth    int               // terminal width for NAWS
-	windowHeight   int               // terminal height for NAWS
-	pending        []byte            // pending bytes from incomplete IAC sequences
+	conn               net.Conn
+	reader             *bufio.Reader
+	decoder            *Decoder
+	debug              bool
+	serverEcho         bool              // true when server is handling echo (client should hide input)
+	echoCallback       EchoCallback      // called when echo state changes
+	dataCallback       func(data string) // called when new data arrives
+	disconnectCallback func(reason error) // called when ReadLoop exits; reason is nil for clean close
+	windowWidth        int               // terminal width for NAWS
+	windowHeight       int               // terminal height for NAWS
+	pending            []byte            // pending bytes from incomplete IAC sequences
 }
 
 // SetDebug enables or disables debug logging.
@@ -40,6 +41,13 @@ func (c *Client) SetEchoCallback(callback EchoCallback) {
 // SetDataCallback sets the callback function for incoming data.
 func (c *Client) SetDataCallback(callback func(data string)) {
 	c.dataCallback = callback
+}
+
+// SetDisconnectCallback sets the callback invoked when ReadLoop exits.
+// reason is nil on clean EOF, or the concrete net/os error for timeouts
+// and transport failures.
+func (c *Client) SetDisconnectCallback(callback func(reason error)) {
+	c.disconnectCallback = callback
 }
 
 // Send writes raw bytes to the connection.
@@ -254,6 +262,13 @@ func Connect(host string, port int) (*Client, error) {
 // It sends decoded text to the dataCallback if set, or prints to stdout.
 func (c *Client) ReadLoop() {
 	buffer := make([]byte, 4096)
+	var exitErr error
+	defer func() {
+		if c.disconnectCallback != nil {
+			c.disconnectCallback(exitErr)
+		}
+	}()
+
 	for {
 		// Set read deadline to handle stale connections
 		c.conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
@@ -262,9 +277,11 @@ func (c *Client) ReadLoop() {
 		if err != nil {
 			if err == io.EOF {
 				// Clean disconnect
+				exitErr = nil
 				return
 			}
 			// Other network errors
+			exitErr = err
 			return
 		}
 
@@ -277,8 +294,9 @@ func (c *Client) ReadLoop() {
 				if c.debug {
 					c.logNegotiations(responses)
 				}
-				if err := c.Send(responses); err != nil {
+				if werr := c.Send(responses); werr != nil {
 					// Failed to send negotiation response, likely connection lost
+					exitErr = werr
 					return
 				}
 			}

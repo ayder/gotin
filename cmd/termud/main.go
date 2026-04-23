@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -259,12 +260,22 @@ func main() {
 			}
 		})
 
+		c.SetDisconnectCallback(func(reason error) {
+			var msg string
+			if reason == nil {
+				msg = "\nConnection closed (server disconnected).\n"
+			} else if ne, ok := reason.(net.Error); ok && ne.Timeout() {
+				msg = "\nConnection closed (read timeout; server may be unresponsive).\n"
+			} else {
+				msg = fmt.Sprintf("\nConnection closed: %v\n", reason)
+			}
+			trySendUI(ui.StatusMsg{Message: msg})
+		})
+
 		// Start reading in a goroutine
 		go func() {
 			defer c.Close()
 			c.ReadLoop()
-			// If ReadLoop exits, connection is closed
-			p.Send(ui.StatusMsg{Message: "\nConnection closed.\n"})
 		}()
 
 		trySendUI(ui.StatusMsg{Message: "Connected!\n"})
