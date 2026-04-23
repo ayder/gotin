@@ -61,3 +61,37 @@ func TestDisconnectCallback_Timeout(t *testing.T) {
 		t.Fatal("callback not invoked within 2s")
 	}
 }
+
+func TestGMCP_Dispatch(t *testing.T) {
+	c := &Client{}
+	var gotPkg string
+	var gotPayload []byte
+	c.SetGMCPCallback(func(pkg string, payload []byte) {
+		gotPkg = pkg
+		gotPayload = payload
+	})
+
+	// IAC SB GMCP "Room.Info {\"name\":\"Foyer\"}" IAC SE
+	msg := []byte("Room.Info {\"name\":\"Foyer\"}")
+	buf := []byte{IAC, SB, GMCP}
+	buf = append(buf, msg...)
+	buf = append(buf, IAC, SE)
+
+	_, _ = c.ProcessIAC(buf)
+
+	if gotPkg != "Room.Info" {
+		t.Fatalf("expected pkg Room.Info, got %q", gotPkg)
+	}
+	if string(gotPayload) != `{"name":"Foyer"}` {
+		t.Fatalf("expected payload JSON, got %q", string(gotPayload))
+	}
+}
+
+func TestGMCP_AcceptWillOffer(t *testing.T) {
+	c := &Client{}
+	_, resp := c.ProcessIAC([]byte{IAC, WILL, GMCP})
+	want := []byte{IAC, DO, GMCP}
+	if string(resp) != string(want) {
+		t.Fatalf("expected DO GMCP reply, got %v", resp)
+	}
+}

@@ -24,6 +24,7 @@ type Client struct {
 	echoCallback       EchoCallback      // called when echo state changes
 	dataCallback       func(data string) // called when new data arrives
 	disconnectCallback func(reason error) // called when ReadLoop exits; reason is nil for clean close
+	gmcpCallback       GMCPCallback      // called when a GMCP subnegotiation arrives
 	windowWidth        int               // terminal width for NAWS
 	windowHeight       int               // terminal height for NAWS
 	readDeadline       time.Duration     // per-read timeout; defaults to 5 minutes
@@ -50,6 +51,11 @@ func (c *Client) SetDataCallback(callback func(data string)) {
 // and transport failures.
 func (c *Client) SetDisconnectCallback(callback func(reason error)) {
 	c.disconnectCallback = callback
+}
+
+// SetGMCPCallback registers a handler for inbound GMCP subnegotiations.
+func (c *Client) SetGMCPCallback(cb GMCPCallback) {
+	c.gmcpCallback = cb
 }
 
 // SetReadTimeout overrides the per-read deadline used by ReadLoop.
@@ -192,6 +198,8 @@ func (c *Client) handleNegotiation(cmd, option byte, respBuf *[]byte) {
 			}
 		} else if option == SGA {
 			*respBuf = append(*respBuf, IAC, DO, option)
+		} else if option == GMCP {
+			*respBuf = append(*respBuf, IAC, DO, option)
 		} else {
 			*respBuf = append(*respBuf, IAC, DONT, option)
 		}
@@ -222,6 +230,11 @@ func (c *Client) handleSubnegotiation(option byte, data []byte, respBuf *[]byte)
 	case TTYPE:
 		if len(data) > 0 && data[0] == TTYPE_SEND {
 			*respBuf = append(*respBuf, c.buildTTYPE()...)
+		}
+	case GMCP:
+		if c.gmcpCallback != nil {
+			pkg, payload := splitGMCP(data)
+			c.gmcpCallback(pkg, payload)
 		}
 	}
 }
