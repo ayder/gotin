@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"dmud/internal/config"
 	"dmud/internal/input"
@@ -49,6 +50,16 @@ func main() {
 	if err != nil {
 		log.Println("Error loading config:", err)
 	}
+
+	// Initialize debounced config saver (coalesces saves to at most once per 500ms)
+	cfgSaver := config.NewDebouncedSaver(500*time.Millisecond, func(v any) error {
+		c, ok := v.(config.Config)
+		if !ok {
+			return nil
+		}
+		return cfgMgr.Save(c)
+	})
+	defer cfgSaver.Flush()
 
 	// 3. Setup Channels
 	// UI -> Network (Text to send to server)
@@ -286,7 +297,7 @@ func main() {
 		// Update Config
 		cfg.LastHost = h
 		cfg.LastPort = port
-		cfgMgr.Save(cfg)
+		cfgSaver.Schedule(cfg)
 	}
 
 	// 8. Handle Local Commands (Goroutine)
@@ -593,7 +604,7 @@ func main() {
 					}
 				}
 
-				cfgMgr.Save(cfg)
+				cfgSaver.Schedule(cfg)
 			}
 		}
 	}()
