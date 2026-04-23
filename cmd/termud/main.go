@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"dmud/internal/config"
@@ -75,10 +76,9 @@ func main() {
 		}
 	}()
 
-	// trySendUI enqueues a tea.Msg onto uiMsgChan without blocking. Safe to call
-	// from a single producer only (the network reader's echo/data callbacks);
-	// a future second producer would need a mutex around the pop-merge-push
-	// critical section below.
+	// trySendUI enqueues a tea.Msg onto uiMsgChan without blocking. It is now
+	// safe to call from any goroutine (the body takes uiMux for the pop-merge
+	// -push critical section).
 	//
 	// On buffer overflow we attempt best-effort coalescing of consecutive
 	// NetworkDataMsg values so streaming data is preserved in the common case.
@@ -87,7 +87,10 @@ func main() {
 	// is a NetworkDataMsg whose merged form also cannot be enqueued, both the
 	// old and the new chunk are dropped — this only occurs when the UI pump
 	// goroutine is completely stalled.
+	var uiMux sync.Mutex
 	trySendUI := func(msg tea.Msg) {
+		uiMux.Lock()
+		defer uiMux.Unlock()
 		if data, ok := msg.(ui.NetworkDataMsg); ok {
 			select {
 			case uiMsgChan <- data:
@@ -204,8 +207,6 @@ func main() {
 
 	// Helper to connect
 	connect := func(h string, port int) {
-		old := client.Load()
-
 		trySendUI(ui.StatusMsg{Message: fmt.Sprintf("Connecting to %s:%d...\n", h, port)})
 
 		c, err := network.Connect(h, port)
@@ -216,8 +217,7 @@ func main() {
 
 		c.SetDebug(*debug)
 		c.SetWindowSize(model.Width(), model.Height())
-		client.Store(c)
-		if old != nil {
+		if old := client.Swap(c); old != nil {
 			old.Close()
 		}
 
