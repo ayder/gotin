@@ -95,3 +95,40 @@ func TestGMCP_AcceptWillOffer(t *testing.T) {
 		t.Fatalf("expected DO GMCP reply, got %v", resp)
 	}
 }
+
+func TestQMethod_NoDuplicateReplyOnRepeatedWILL(t *testing.T) {
+	c := &Client{}
+	_, r1 := c.ProcessIAC([]byte{IAC, WILL, ECHO})
+	_, r2 := c.ProcessIAC([]byte{IAC, WILL, ECHO})
+	if string(r1) != string([]byte{IAC, DO, ECHO}) {
+		t.Fatalf("first reply: want DO ECHO, got %v", r1)
+	}
+	if len(r2) != 0 {
+		t.Fatalf("second reply: want silence, got %v", r2)
+	}
+}
+
+func TestQMethod_NoReplyOnUnchangedDONT(t *testing.T) {
+	c := &Client{}
+	// We never enabled NAWS-from-server; a DONT NAWS from server is already our state.
+	_, r := c.ProcessIAC([]byte{IAC, DONT, NAWS})
+	if len(r) != 0 {
+		t.Fatalf("want silence on DONT for already-disabled option, got %v", r)
+	}
+}
+
+func TestQMethod_RefusalReplyOnUnknownOption(t *testing.T) {
+	c := &Client{}
+	_, r := c.ProcessIAC([]byte{IAC, WILL, MSDP})
+	if string(r) != string([]byte{IAC, DONT, MSDP}) {
+		t.Fatalf("want DONT MSDP for unknown option, got %v", r)
+	}
+}
+
+func TestQMethod_DoSGA_ReplyWILL(t *testing.T) {
+	c := &Client{}
+	_, r := c.ProcessIAC([]byte{IAC, DO, SGA})
+	if string(r) != string([]byte{IAC, WILL, SGA}) {
+		t.Fatalf("want WILL SGA, got %v", r)
+	}
+}

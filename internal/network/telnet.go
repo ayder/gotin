@@ -29,6 +29,7 @@ type Client struct {
 	windowHeight       int               // terminal height for NAWS
 	readDeadline       time.Duration     // per-read timeout; defaults to 5 minutes
 	pending            []byte            // pending bytes from incomplete IAC sequences
+	options            *optionTable      // per-option Q Method state (him/us)
 }
 
 // SetDebug enables or disables debug logging.
@@ -184,43 +185,87 @@ func (c *Client) ProcessIAC(data []byte) (cleanData []byte, responses []byte) {
 	return result, respBuf
 }
 
-// handleNegotiation handles DO/DONT/WILL/WONT commands.
+// handleNegotiation handles DO/DONT/WILL/WONT commands using a simplified
+// RFC 1143 Q Method state machine (receive-side only).
 func (c *Client) handleNegotiation(cmd, option byte, respBuf *[]byte) {
+	if c.options == nil {
+		c.options = newOptionTable()
+	}
 	switch cmd {
 	case WILL:
-		if option == ECHO {
+		if c.options.getHim(option) == optYes {
+			return // already enabled; stay silent
+		}
+		if c.acceptHim(option) {
+			c.options.setHim(option, optYes)
 			*respBuf = append(*respBuf, IAC, DO, option)
-			if !c.serverEcho {
-				c.serverEcho = true
-				if c.echoCallback != nil {
-					c.echoCallback(false)
-				}
-			}
-		} else if option == SGA {
-			*respBuf = append(*respBuf, IAC, DO, option)
-		} else if option == GMCP {
-			*respBuf = append(*respBuf, IAC, DO, option)
+			c.onHimEnabled(option)
 		} else {
+			// Refuse once. RFC 1143 says a DONT reply here is fine; we do not
+			// memoize the refusal because him remains optNo.
 			*respBuf = append(*respBuf, IAC, DONT, option)
 		}
 	case WONT:
-		if option == ECHO {
-			*respBuf = append(*respBuf, IAC, DONT, option)
-			if c.serverEcho {
-				c.serverEcho = false
-				if c.echoCallback != nil {
-					c.echoCallback(true)
-				}
-			}
+		if c.options.getHim(option) == optNo {
+			return // already disabled; stay silent
 		}
+		c.options.setHim(option, optNo)
+		*respBuf = append(*respBuf, IAC, DONT, option)
+		c.onHimDisabled(option)
 	case DO:
-		if option == NAWS || option == SGA {
+		if c.options.getUs(option) == optYes {
+			return
+		}
+		if c.acceptUs(option) {
+			c.options.setUs(option, optYes)
 			*respBuf = append(*respBuf, IAC, WILL, option)
 		} else {
 			*respBuf = append(*respBuf, IAC, WONT, option)
 		}
 	case DONT:
-		// Acknowledge by silence or WONT if we were WILLing
+		if c.options.getUs(option) == optNo {
+			return
+		}
+		c.options.setUs(option, optNo)
+		*respBuf = append(*respBuf, IAC, WONT, option)
+	}
+}
+
+// acceptHim reports whether we accept the server performing this option.
+func (c *Client) acceptHim(option byte) bool {
+	switch option {
+	case ECHO, SGA, GMCP:
+		return true
+	}
+	return false
+}
+
+// acceptUs reports whether we accept performing this option ourselves.
+func (c *Client) acceptUs(option byte) bool {
+	switch option {
+	case NAWS, TTYPE, SGA:
+		return true
+	}
+	return false
+}
+
+// onHimEnabled fires side-effects when server-side state flips to YES.
+func (c *Client) onHimEnabled(option byte) {
+	if option == ECHO {
+		c.serverEcho = true
+		if c.echoCallback != nil {
+			c.echoCallback(false)
+		}
+	}
+}
+
+// onHimDisabled fires side-effects when server-side state flips to NO.
+func (c *Client) onHimDisabled(option byte) {
+	if option == ECHO && c.serverEcho {
+		c.serverEcho = false
+		if c.echoCallback != nil {
+			c.echoCallback(true)
+		}
 	}
 }
 
@@ -276,6 +321,7 @@ func Connect(host string, port int) (*Client, error) {
 		conn:    conn,
 		reader:  bufio.NewReader(conn),
 		decoder: NewDecoder(),
+		options: newOptionTable(),
 	}, nil
 }
 
