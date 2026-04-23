@@ -74,9 +74,18 @@ func main() {
 		}
 	}()
 
-	// trySendUI enqueues a tea.Msg onto uiMsgChan without blocking.
-	// For NetworkDataMsg we coalesce with any pending NetworkDataMsg already in
-	// the buffer instead of dropping, so no incoming bytes are lost.
+	// trySendUI enqueues a tea.Msg onto uiMsgChan without blocking. Safe to call
+	// from a single producer only (the network reader's echo/data callbacks);
+	// a future second producer would need a mutex around the pop-merge-push
+	// critical section below.
+	//
+	// On buffer overflow we attempt best-effort coalescing of consecutive
+	// NetworkDataMsg values so streaming data is preserved in the common case.
+	// StatusMsg / SetLocalEchoMsg / other control messages are dropped on
+	// overflow. In the pathological case where the queue is full and the head
+	// is a NetworkDataMsg whose merged form also cannot be enqueued, both the
+	// old and the new chunk are dropped — this only occurs when the UI pump
+	// goroutine is completely stalled.
 	trySendUI := func(msg tea.Msg) {
 		if data, ok := msg.(ui.NetworkDataMsg); ok {
 			select {
@@ -84,33 +93,33 @@ func main() {
 				return
 			default:
 			}
-			// Buffer full: try to coalesce with the most recent NetworkDataMsg.
-			for {
-				select {
-				case prev := <-uiMsgChan:
-					if pd, ok := prev.(ui.NetworkDataMsg); ok {
-						combined := ui.NetworkDataMsg{Data: pd.Data + data.Data}
-						select {
-						case uiMsgChan <- combined:
-							return
-						default:
-							// Still full — requeue and drop this chunk as last resort.
-							_ = combined
-							return
-						}
-					}
-					// Non-data msg popped; put it back-ish by re-sending and drop our data.
+			select {
+			case prev := <-uiMsgChan:
+				if pd, ok := prev.(ui.NetworkDataMsg); ok {
+					combined := ui.NetworkDataMsg{Data: pd.Data + data.Data}
 					select {
-					case uiMsgChan <- prev:
+					case uiMsgChan <- combined:
 					default:
+						// Queue still full: both old and new chunks are dropped.
 					}
-					return
-				default:
 					return
 				}
+				// Non-data head (e.g. StatusMsg): restore it, drop our chunk.
+				select {
+				case uiMsgChan <- prev:
+				default:
+				}
+				return
+			default:
+				// Queue drained between our full and our pop: retry fast path.
+				select {
+				case uiMsgChan <- data:
+				default:
+				}
+				return
 			}
 		}
-		// Status and other control msgs: drop on overflow.
+		// Non-data msg (StatusMsg, SetLocalEchoMsg, ...): drop on overflow.
 		select {
 		case uiMsgChan <- msg:
 		default:
