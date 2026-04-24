@@ -1,0 +1,58 @@
+# Go artifacts
+**/bin/
+**/pkg/
+**/obj/
+**/build/
+
+# Build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*_test.go
+*test.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.ayder
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+
+# Local config
+.local
+.env
+config/local.yaml
+config/local.json
+
+# Logs
+logs/
+*.log
+
+# Coverage reports
+coverage.out
+coverprofile.out
+
+# Documentation
+docs/_book/
+docs/.git/
+
+# Cache
+.cache/
+*.cache
+
+# Dependencies
+vendor/
+node_modules/
+.go-version

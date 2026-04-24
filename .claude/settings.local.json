@@ -4,7 +4,10 @@
       "Bash(go build:*)",
       "Bash(find:*)",
       "Bash(tree:*)",
-      "Bash(go test:*)"
+      "Bash(go test:*)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git commit *)"
     ]
   }
 }

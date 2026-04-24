@@ -1,0 +1,18 @@
+{
+  "aliases": {
+    "exa": "search; forage; dig under dirt"
+  },
+  "triggers": [
+    {
+      "pattern": "^Your name?",
+      "response": "Vozol"
+    }
+  ],
+  "connections": {
+    "t2t": {
+      "host": "t2tmud.org",
+      "port": 9999,
+      "auto": true
+    }
+  }
+}
