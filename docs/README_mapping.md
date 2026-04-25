@@ -1,6 +1,6 @@
-# TermMud Mapping System
+# Gotin Mapping System
 
-This document outlines the internal workings and user-facing features of the TermMud mapping system. TermMud uses a powerful hybrid mapping approach that allows for both manual graph construction and smart auto-mapping, visualizing the result directly in your terminal using [Mermaid](https://mermaid.js.org/) syntax.
+This document outlines the internal workings and user-facing features of the Gotin mapping system. Gotin uses a powerful hybrid mapping approach that allows for both manual graph construction and smart auto-mapping, visualizing the result directly in your terminal using [Mermaid](https://mermaid.js.org/) syntax.
 
 ## 1. Overview
 

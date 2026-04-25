@@ -1,4 +1,4 @@
-module dmud
+module github.com/ayder/gotin
 
 go 1.25.5
 

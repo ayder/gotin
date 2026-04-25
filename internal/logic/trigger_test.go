@@ -360,6 +360,36 @@ func TestStripANSI(t *testing.T) {
 			input:    "",
 			expected: "",
 		},
+		{
+			name:     "cursor home",
+			input:    "\x1b[HHello",
+			expected: "Hello",
+		},
+		{
+			name:     "clear screen",
+			input:    "\x1b[2JHello",
+			expected: "Hello",
+		},
+		{
+			name:     "erase line",
+			input:    "Hello\x1b[KWorld",
+			expected: "HelloWorld",
+		},
+		{
+			name:     "hide cursor",
+			input:    "\x1b[?25lHello",
+			expected: "Hello",
+		},
+		{
+			name:     "cursor position",
+			input:    "\x1b[10;20HHello",
+			expected: "Hello",
+		},
+		{
+			name:     "OSC window title",
+			input:    "\x1b]0;MyMUD\x07Hello",
+			expected: "Hello",
+		},
 	}
 
 	for _, tt := range tests {

@@ -1,6 +1,5 @@
 # Go artifacts
 **/bin/
-**/pkg/
 **/obj/
 **/build/
 
@@ -10,9 +9,9 @@
 *.dll
 *.so
 *.dylib
+gotin
 
 # Test artifacts
-*_test.go
 *test.log
 
 # IDE

@@ -2,10 +2,13 @@ package network
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
+	"os"
 	"strconv"
 	"time"
 )
@@ -17,24 +20,51 @@ type EchoCallback func(localEcho bool)
 // Client wraps a TCP connection to a MUD server.
 type Client struct {
 	conn               net.Conn
-	reader             *bufio.Reader
+	reader             io.Reader          // swapped by protocols (e.g. MCCP2 zlib.Reader)
 	decoder            *Decoder
 	debug              bool
-	serverEcho         bool              // true when server is handling echo (client should hide input)
-	echoCallback       EchoCallback      // called when echo state changes
-	dataCallback       func(data string) // called when new data arrives
+	serverEcho         bool               // true when server is handling echo (client should hide input)
+	echoCallback       EchoCallback       // called when echo state changes
+	dataCallback       func(data string)  // called when new data arrives
 	disconnectCallback func(reason error) // called when ReadLoop exits; reason is nil for clean close
-	gmcpCallback       GMCPCallback      // called when a GMCP subnegotiation arrives
-	windowWidth        int               // terminal width for NAWS
-	windowHeight       int               // terminal height for NAWS
-	readDeadline       time.Duration     // per-read timeout; defaults to 5 minutes
-	pending            []byte            // pending bytes from incomplete IAC sequences
-	options            *optionTable      // per-option Q Method state (him/us)
+	windowWidth        int                // terminal width for NAWS
+	windowHeight       int                // terminal height for NAWS
+	readDeadline       time.Duration      // per-read timeout; defaults to 5 minutes
+	pending            []byte             // pending bytes from incomplete IAC sequences
+	options            *optionTable       // per-option Q Method state (him/us)
+	protocols          map[byte]Protocol  // installed subprotocols keyed by option byte
+	protocolStatusCb   func(active []string) // fires when the negotiated-protocol set changes
+	pendingSwap        func(io.Reader) io.Reader // set by ctx.SwapReader, consumed by ReadLoop
+	streamTail         []byte             // bytes after the triggering IAC SE to replay into the swapped reader
+	debugLog           *log.Logger
+	debugFile          *os.File
 }
 
 // SetDebug enables or disables debug logging.
 func (c *Client) SetDebug(enabled bool) {
+	if enabled && c.debugLog == nil {
+		f, err := os.OpenFile("gotin.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err == nil {
+			c.debugFile = f
+			c.debugLog = log.New(f, "", log.LstdFlags)
+		}
+	} else if !enabled && c.debugFile != nil {
+		c.debugFile.Close()
+		c.debugFile = nil
+		c.debugLog = nil
+	}
 	c.debug = enabled
+}
+
+func (c *Client) debugf(format string, args ...any) {
+	if c.debug && c.debugLog != nil {
+		c.debugLog.Printf(format, args...)
+	}
+}
+
+// DebugLogf writes a timestamped line to the debug log file if debug is enabled.
+func (c *Client) DebugLogf(format string, args ...any) {
+	c.debugf(format, args...)
 }
 
 // SetEchoCallback sets the callback function for echo state changes.
@@ -52,11 +82,6 @@ func (c *Client) SetDataCallback(callback func(data string)) {
 // and transport failures.
 func (c *Client) SetDisconnectCallback(callback func(reason error)) {
 	c.disconnectCallback = callback
-}
-
-// SetGMCPCallback registers a handler for inbound GMCP subnegotiations.
-func (c *Client) SetGMCPCallback(cb GMCPCallback) {
-	c.gmcpCallback = cb
 }
 
 // SetReadTimeout overrides the per-read deadline used by ReadLoop.
@@ -134,6 +159,15 @@ func (c *Client) ProcessIAC(data []byte) (cleanData []byte, responses []byte) {
 						subData := c.unescapeSubneg(data[i+3 : j])
 						c.handleSubnegotiation(option, subData, &respBuf)
 						i = j + 2
+						// A subneg handler may have requested a stream swap
+						// (MCCP2). Everything after this IAC SE is for the
+						// swapped reader, so hand off and stop processing.
+						if c.pendingSwap != nil {
+							if i < len(data) {
+								c.streamTail = append([]byte(nil), data[i:]...)
+							}
+							return result, respBuf
+						}
 					} else {
 						c.pending = data[i:]
 						return result, respBuf
@@ -188,6 +222,9 @@ func (c *Client) ProcessIAC(data []byte) (cleanData []byte, responses []byte) {
 // handleNegotiation handles DO/DONT/WILL/WONT commands using a simplified
 // RFC 1143 Q Method state machine (receive-side only).
 func (c *Client) handleNegotiation(cmd, option byte, respBuf *[]byte) {
+	if c.debug {
+		c.debugf("Recv: %s %d", cmdName(cmd), option)
+	}
 	if c.options == nil {
 		c.options = newOptionTable()
 	}
@@ -219,6 +256,10 @@ func (c *Client) handleNegotiation(cmd, option byte, respBuf *[]byte) {
 		if c.acceptUs(option) {
 			c.options.setUs(option, optYes)
 			*respBuf = append(*respBuf, IAC, WILL, option)
+			if option == NAWS {
+				*respBuf = append(*respBuf, c.buildNAWS()...)
+			}
+			c.onUsEnabled(option)
 		} else {
 			*respBuf = append(*respBuf, IAC, WONT, option)
 		}
@@ -228,22 +269,33 @@ func (c *Client) handleNegotiation(cmd, option byte, respBuf *[]byte) {
 		}
 		c.options.setUs(option, optNo)
 		*respBuf = append(*respBuf, IAC, WONT, option)
+		c.onUsDisabled(option)
 	}
 }
 
 // acceptHim reports whether we accept the server performing this option.
+// Built-in options (ECHO, SGA) are always accepted; an installed Protocol
+// with KindHim is also accepted.
 func (c *Client) acceptHim(option byte) bool {
 	switch option {
-	case ECHO, SGA, GMCP:
+	case ECHO, SGA:
+		return true
+	}
+	if p, ok := c.protocols[option]; ok && p.Kind()&KindHim != 0 {
 		return true
 	}
 	return false
 }
 
 // acceptUs reports whether we accept performing this option ourselves.
+// Built-in options (NAWS, TTYPE, SGA) are always accepted; an installed
+// Protocol with KindUs is also accepted.
 func (c *Client) acceptUs(option byte) bool {
 	switch option {
 	case NAWS, TTYPE, SGA:
+		return true
+	}
+	if p, ok := c.protocols[option]; ok && p.Kind()&KindUs != 0 {
 		return true
 	}
 	return false
@@ -257,6 +309,12 @@ func (c *Client) onHimEnabled(option byte) {
 			c.echoCallback(false)
 		}
 	}
+	if p, ok := c.protocols[option]; ok {
+		if err := p.OnEnable(c.ctx()); err != nil && c.debug {
+			c.debugf("%s OnEnable: %v", p.Name(), err)
+		}
+		c.notifyProtocolStatus()
+	}
 }
 
 // onHimDisabled fires side-effects when server-side state flips to NO.
@@ -267,19 +325,49 @@ func (c *Client) onHimDisabled(option byte) {
 			c.echoCallback(true)
 		}
 	}
+	if p, ok := c.protocols[option]; ok {
+		p.OnDisable(c.ctx())
+		c.notifyProtocolStatus()
+	}
+}
+
+// onUsEnabled fires OnEnable on an installed Protocol when the client-side
+// Q Method state flips to YES (i.e. we replied WILL to the server's DO).
+func (c *Client) onUsEnabled(option byte) {
+	if p, ok := c.protocols[option]; ok {
+		if err := p.OnEnable(c.ctx()); err != nil && c.debug {
+			c.debugf("%s OnEnable: %v", p.Name(), err)
+		}
+		c.notifyProtocolStatus()
+	}
+}
+
+// onUsDisabled fires OnDisable when the client-side Q Method state flips
+// to NO.
+func (c *Client) onUsDisabled(option byte) {
+	if p, ok := c.protocols[option]; ok {
+		p.OnDisable(c.ctx())
+		c.notifyProtocolStatus()
+	}
 }
 
 // handleSubnegotiation handles SB ... SE sequences.
+// Built-in options (TTYPE) are handled inline; any option with an installed
+// Protocol dispatches to its OnSubnegotiation.
 func (c *Client) handleSubnegotiation(option byte, data []byte, respBuf *[]byte) {
 	switch option {
 	case TTYPE:
 		if len(data) > 0 && data[0] == TTYPE_SEND {
 			*respBuf = append(*respBuf, c.buildTTYPE()...)
 		}
-	case GMCP:
-		if c.gmcpCallback != nil {
-			pkg, payload := splitGMCP(data)
-			c.gmcpCallback(pkg, payload)
+		return
+	}
+	if p, ok := c.protocols[option]; ok {
+		if c.debug {
+			c.debugf("Recv: SB %d len=%d", option, len(data))
+		}
+		if err := p.OnSubnegotiation(c.ctx(), data); err != nil && c.debug {
+			c.debugf("%s OnSubnegotiation: %v", p.Name(), err)
 		}
 	}
 }
@@ -318,10 +406,11 @@ func Connect(host string, port int) (*Client, error) {
 		return nil, fmt.Errorf("failed to connect to %s: %w", addr, err)
 	}
 	return &Client{
-		conn:    conn,
-		reader:  bufio.NewReader(conn),
-		decoder: NewDecoder(),
-		options: newOptionTable(),
+		conn:      conn,
+		reader:    bufio.NewReader(conn),
+		decoder:   NewDecoder(),
+		options:   newOptionTable(),
+		protocols: make(map[byte]Protocol),
 	}, nil
 }
 
@@ -345,17 +434,6 @@ func (c *Client) ReadLoop() {
 		c.conn.SetReadDeadline(time.Now().Add(deadline))
 
 		n, err := c.reader.Read(buffer)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				// Clean disconnect
-				exitErr = nil
-				return
-			}
-			// Other network errors
-			exitErr = err
-			return
-		}
-
 		if n > 0 {
 			// Process IAC sequences and get negotiation responses
 			clean, responses := c.ProcessIAC(buffer[:n])
@@ -380,7 +458,72 @@ func (c *Client) ReadLoop() {
 					fmt.Print(text)
 				}
 			}
+
+			// Apply any pending reader swap requested by a subneg handler
+			// (e.g. MCCP2 wrapping the stream in a zlib reader).
+			if c.pendingSwap != nil {
+				swap := c.pendingSwap
+				tail := c.streamTail
+				c.pendingSwap = nil
+				c.streamTail = nil
+
+				// CRITICAL: the old c.reader is a *bufio.Reader and may have
+				// buffered compressed bytes that were read from the socket but
+				// not yet returned by Read(). If we replace it without draining
+				// those bytes, the zlib decompressor will miss them and produce
+				// garbage.
+				buffered := 0
+				if br, ok := c.reader.(*bufio.Reader); ok {
+					if buffered = br.Buffered(); buffered > 0 {
+						peeked, _ := br.Peek(buffered)
+						// Copy because Peek references bufio's internal buffer.
+						copied := append([]byte(nil), peeked...)
+						tail = append(tail, copied...)
+					}
+				}
+
+				if c.debug {
+					c.debugf("ReadLoop: reader swap — tail=%d buffered=%d total=%d", len(c.streamTail), buffered, len(tail))
+				}
+
+				var base io.Reader = c.conn
+				if len(tail) > 0 {
+					base = io.MultiReader(bytes.NewReader(tail), c.conn)
+				}
+				c.reader = bufio.NewReader(swap(base))
+			}
 		}
+
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				exitErr = nil
+				return
+			}
+			exitErr = err
+			return
+		}
+	}
+}
+
+// cmdName returns the human-readable name for a Telnet command byte.
+func cmdName(cmd byte) string {
+	switch cmd {
+	case WILL:
+		return "WILL"
+	case WONT:
+		return "WONT"
+	case DO:
+		return "DO"
+	case DONT:
+		return "DONT"
+	case SB:
+		return "SB"
+	case SE:
+		return "SE"
+	case IAC:
+		return "IAC"
+	default:
+		return fmt.Sprintf("%d", cmd)
 	}
 }
 
@@ -393,18 +536,27 @@ func (c *Client) logNegotiations(responses []byte) {
 			}
 			cmd := responses[i+1]
 			option := responses[i+2]
-			cmdName := ""
-			switch cmd {
-			case WILL:
-				cmdName = "WILL"
-			case WONT:
-				cmdName = "WONT"
-			case DO:
-				cmdName = "DO"
-			case DONT:
-				cmdName = "DONT"
+			c.debugf("Sent: %s %d", cmdName(cmd), option)
+
+			// For subnegotiations, log the payload and skip to IAC SE.
+			if cmd == SB {
+				if option == NAWS && i+7 < len(responses) {
+					// NAWS payload: widthHigh widthLow heightHigh heightLow [IAC SE]
+					w := int(responses[i+3])<<8 | int(responses[i+4])
+					h := int(responses[i+5])<<8 | int(responses[i+6])
+					c.debugf("Sent: NAWS size %dx%d", w, h)
+				}
+				j := i + 3
+				for j+1 < len(responses) {
+					if responses[j] == IAC && responses[j+1] == SE {
+						j += 2
+						break
+					}
+					j++
+				}
+				i = j
+				continue
 			}
-			fmt.Printf("[DEBUG] Sent: %s %d\n", cmdName, option)
 			i += 3
 		} else {
 			i++
@@ -430,11 +582,11 @@ func (c *Client) buildTTYPE() []byte {
 
 // buildNAWS returns a NAWS subnegotiation with the current window size.
 func (c *Client) buildNAWS() []byte {
-	w := c.windowWidth
+	rawW, rawH := c.windowWidth, c.windowHeight
+	w, h := rawW, rawH
 	if w <= 0 {
 		w = 80
 	}
-	h := c.windowHeight
 	if h <= 0 {
 		h = 24
 	}
@@ -442,6 +594,10 @@ func (c *Client) buildNAWS() []byte {
 	widthLow := byte(w & 0xFF)
 	heightHigh := byte(h >> 8)
 	heightLow := byte(h & 0xFF)
+
+	if c.debug {
+		c.debugf("buildNAWS: raw=%dx%d effective=%dx%d", rawW, rawH, w, h)
+	}
 
 	payload := []byte{widthHigh, widthLow, heightHigh, heightLow}
 	result := make([]byte, 0, 3+len(payload)*2+2)
@@ -452,10 +608,15 @@ func (c *Client) buildNAWS() []byte {
 }
 
 // SendNAWS sends the current window size to the server via NAWS subnegotiation.
+// It sends regardless of negotiation state so that terminal resizes are not lost
+// when they race with the server's DO NAWS.
 func (c *Client) SendNAWS() {
-	if c.conn != nil {
-		c.Send(c.buildNAWS())
+	if c.conn == nil || c.options == nil {
+		return
 	}
+	negotiated := c.options.getUs(NAWS) == optYes
+	c.debugf("SendNAWS: window=%dx%d negotiated=%v", c.windowWidth, c.windowHeight, negotiated)
+	c.Send(c.buildNAWS())
 }
 
 // Close closes the underlying connection.

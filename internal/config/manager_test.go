@@ -8,7 +8,7 @@ import (
 
 func TestManager_SaveAndLoad(t *testing.T) {
 	// Create a temp directory for testing
-	tmpDir, err := os.MkdirTemp("", "termud-test-*")
+	tmpDir, err := os.MkdirTemp("", "gotin-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestManager_SaveAndLoad(t *testing.T) {
 }
 
 func TestManager_LoadNonExistent(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "termud-test-*")
+	tmpDir, err := os.MkdirTemp("", "gotin-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestManager_LoadNonExistent(t *testing.T) {
 }
 
 func TestManager_SaveCreatesDirectory(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "termud-test-*")
+	tmpDir, err := os.MkdirTemp("", "gotin-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
@@ -130,11 +130,11 @@ func TestDefaultConfigPath(t *testing.T) {
 		t.Fatalf("DefaultConfigPath failed: %v", err)
 	}
 
-	// Should end with .termud/config.json
+	// Should end with .gotin/config.json
 	if filepath.Base(path) != "config.json" {
 		t.Errorf("Expected path to end with config.json, got %s", filepath.Base(path))
 	}
-	if filepath.Base(filepath.Dir(path)) != ".termud" {
-		t.Errorf("Expected parent dir to be .termud, got %s", filepath.Base(filepath.Dir(path)))
+	if filepath.Base(filepath.Dir(path)) != ".gotin" {
+		t.Errorf("Expected parent dir to be .gotin, got %s", filepath.Base(filepath.Dir(path)))
 	}
 }

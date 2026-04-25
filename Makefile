@@ -1,8 +1,8 @@
-# Makefile for TermMud
+# Makefile for Gotin
 
 # Variables
-BINARY_NAME=termud
-CMD_DIR=./cmd/termud
+BINARY_NAME=gotin
+CMD_DIR=./cmd/gotin
 BUILD_DIR=./build
 
 # Go parameters

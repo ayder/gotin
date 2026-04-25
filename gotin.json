@@ -1,0 +1,12 @@
+{
+  "aliases": {
+    "l": "look ; search; rummage through room; forage"
+  },
+  "connections": {
+    "t2t": {
+      "host": "t2tmud.org",
+      "port": 9999,
+      "auto": true
+    }
+  }
+}

@@ -82,6 +82,33 @@ type Map struct {
 	CurrentRoom string           `json:"current_room"`
 }
 
+// deepCopy returns a fully independent copy of the map.
+func (m *Map) deepCopy() *Map {
+	copy := &Map{
+		Rooms:       make(map[string]*Room, len(m.Rooms)),
+		CurrentRoom: m.CurrentRoom,
+	}
+	for id, room := range m.Rooms {
+		r := &Room{
+			ID:              room.ID,
+			Name:            room.Name,
+			Description:     room.Description,
+			DescriptionHash: room.DescriptionHash,
+			X:               room.X,
+			Y:               room.Y,
+			Z:               room.Z,
+		}
+		if room.Exits != nil {
+			r.Exits = make(map[Direction]string, len(room.Exits))
+			for d, exitID := range room.Exits {
+				r.Exits[d] = exitID
+			}
+		}
+		copy.Rooms[id] = r
+	}
+	return copy
+}
+
 // DefaultPaths returns the standard set of directions.
 func DefaultPaths() []Direction {
 	return []Direction{
@@ -96,7 +123,7 @@ type Engine struct {
 	data        *Map
 	mu          sync.RWMutex
 	path        string      // Persistence path
-	undo        []string    // Stack of serialized states (simple but effective for small maps)
+	undo        []mapCommand // Undo stack
 	paths       []Direction // Configured available directions
 	autoMapping bool        // Whether auto-mapping mode is enabled
 
@@ -120,7 +147,7 @@ func NewEngine(path string) *Engine {
 			Rooms: make(map[string]*Room),
 		},
 		path:      path,
-		undo:      make([]string, 0),
+		undo:      make([]mapCommand, 0),
 		paths:     DefaultPaths(),
 		hashIndex: make(map[string]string),
 	}
@@ -300,6 +327,7 @@ func (e *Engine) Create(filename string) error {
 		Rooms: make(map[string]*Room),
 	}
 	e.hashIndex = make(map[string]string)
+	e.undo = e.undo[:0]
 
 	// Create Start Room
 	startRoom := &Room{
@@ -322,14 +350,16 @@ func (e *Engine) rebuildHashIndex() {
 	}
 }
 
-// saveState pushes current state to undo stack
+// saveState pushes a snapshot of the current map state onto the undo stack.
+// Used by auto-mapping operations.
 func (e *Engine) saveState() {
-	if data, err := json.Marshal(e.data); err == nil {
-		e.undo = append(e.undo, string(data))
-		// Limit stack size
-		if len(e.undo) > 50 {
-			e.undo = e.undo[1:]
-		}
+	e.undo = append(e.undo, &snapshotCmd{
+		snapshot:        e.data.deepCopy(),
+		pendingDir:      e.pendingDir,
+		pendingFromRoom: e.pendingFromRoom,
+	})
+	if len(e.undo) > 50 {
+		e.undo = e.undo[1:]
 	}
 }
 
@@ -338,80 +368,14 @@ func (e *Engine) Dig(dir Direction, name string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// Validate direction is in configured paths
-	validDir := false
-	for _, p := range e.paths {
-		if p == dir {
-			validDir = true
-			break
-		}
+	cmd := &digCmd{dir: dir, name: name}
+	if err := cmd.execute(e); err != nil {
+		return err
 	}
-	if !validDir {
-		return fmt.Errorf("direction %s is not configured in paths", dir)
+	e.undo = append(e.undo, cmd)
+	if len(e.undo) > 50 {
+		e.undo = e.undo[1:]
 	}
-
-	e.saveState()
-
-	currID := e.data.CurrentRoom
-	curr, ok := e.data.Rooms[currID]
-	if !ok {
-		return fmt.Errorf("current room not found")
-	}
-
-	// Check if exit already exists
-	if _, exists := curr.Exits[dir]; exists {
-		return fmt.Errorf("exit %s already exists", dir)
-	}
-
-	// Calculate new coords
-	nx, ny, nz := curr.X, curr.Y, curr.Z
-	switch dir {
-	case North:
-		ny++
-	case South:
-		ny--
-	case East:
-		nx++
-	case West:
-		nx--
-	case NorthEast:
-		nx++
-		ny++
-	case SouthWest:
-		nx--
-		ny--
-	case NorthWest:
-		nx--
-		ny++
-	case SouthEast:
-		nx++
-		ny--
-	case Up:
-		nz++
-	case Down:
-		nz--
-	// In/Out don't affect spatial coordinates
-	}
-
-	newRoom := &Room{
-		ID:    uuid.New().String(),
-		Name:  name,
-		Exits: make(map[Direction]string),
-		X:     nx,
-		Y:     ny,
-		Z:     nz,
-	}
-
-	// Link
-	curr.Exits[dir] = newRoom.ID
-
-	reverse := ReverseDirection(dir)
-	if reverse != "" {
-		newRoom.Exits[reverse] = curr.ID
-	}
-
-	e.data.Rooms[newRoom.ID] = newRoom
-	e.data.CurrentRoom = newRoom.ID
 	return nil
 }
 
@@ -426,44 +390,20 @@ func (e *Engine) Undo() error {
 	last := e.undo[len(e.undo)-1]
 	e.undo = e.undo[:len(e.undo)-1]
 
-	var oldMap Map
-	if err := json.Unmarshal([]byte(last), &oldMap); err != nil {
-		return err
-	}
-	e.data = &oldMap
-	return nil
+	return last.undo(e)
 }
 
 func (e *Engine) DeleteRoom(id string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.saveState()
 
-	if _, ok := e.data.Rooms[id]; !ok {
-		return fmt.Errorf("room %s not found", id)
+	cmd := &deleteCmd{query: id}
+	if err := cmd.execute(e); err != nil {
+		return err
 	}
-
-	// Remove links from other rooms
-	for _, r := range e.data.Rooms {
-		for d, exitID := range r.Exits {
-			if exitID == id {
-				delete(r.Exits, d)
-			}
-		}
-	}
-
-	delete(e.data.Rooms, id)
-	if e.data.CurrentRoom == id {
-		// Reset to random or empty?
-		// Just pick one if available, or create new start
-		if len(e.data.Rooms) > 0 {
-			for k := range e.data.Rooms {
-				e.data.CurrentRoom = k
-				break
-			}
-		} else {
-			// Re-init? handled by Create ideally but here we just leave empty
-		}
+	e.undo = append(e.undo, cmd)
+	if len(e.undo) > 50 {
+		e.undo = e.undo[1:]
 	}
 	return nil
 }
@@ -676,64 +616,14 @@ func (e *Engine) Link(dir Direction, targetQuery string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// Validate direction is in configured paths
-	validDir := false
-	for _, p := range e.paths {
-		if p == dir {
-			validDir = true
-			break
-		}
+	cmd := &linkCmd{dir: dir, targetQuery: targetQuery}
+	if err := cmd.execute(e); err != nil {
+		return err
 	}
-	if !validDir {
-		return fmt.Errorf("direction %s is not configured in paths", dir)
+	e.undo = append(e.undo, cmd)
+	if len(e.undo) > 50 {
+		e.undo = e.undo[1:]
 	}
-
-	curr, ok := e.data.Rooms[e.data.CurrentRoom]
-	if !ok {
-		return fmt.Errorf("current room not found")
-	}
-
-	// Find target room by ID or name
-	var targetID string
-
-	// Try exact ID match
-	if _, ok := e.data.Rooms[targetQuery]; ok {
-		targetID = targetQuery
-	}
-
-	// Try partial ID match
-	if targetID == "" {
-		for id := range e.data.Rooms {
-			if strings.HasPrefix(id, targetQuery) {
-				targetID = id
-				break
-			}
-		}
-	}
-
-	// Try name match (case-insensitive)
-	if targetID == "" {
-		queryLower := strings.ToLower(targetQuery)
-		for id, room := range e.data.Rooms {
-			if strings.ToLower(room.Name) == queryLower {
-				targetID = id
-				break
-			}
-		}
-	}
-
-	if targetID == "" {
-		return fmt.Errorf("target room not found: %s", targetQuery)
-	}
-
-	if targetID == e.data.CurrentRoom {
-		return fmt.Errorf("cannot link room to itself")
-	}
-
-	e.saveState()
-
-	// Create one-way link (no reverse link)
-	curr.Exits[dir] = targetID
 	return nil
 }
 
@@ -742,57 +632,13 @@ func (e *Engine) DeleteByNameOrID(query string) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	var targetID string
-
-	// Try exact ID match
-	if _, ok := e.data.Rooms[query]; ok {
-		targetID = query
+	cmd := &deleteCmd{query: query}
+	if err := cmd.execute(e); err != nil {
+		return err
 	}
-
-	// Try partial ID match
-	if targetID == "" {
-		for id := range e.data.Rooms {
-			if strings.HasPrefix(id, query) {
-				targetID = id
-				break
-			}
-		}
-	}
-
-	// Try name match (case-insensitive)
-	if targetID == "" {
-		queryLower := strings.ToLower(query)
-		for id, room := range e.data.Rooms {
-			if strings.ToLower(room.Name) == queryLower {
-				targetID = id
-				break
-			}
-		}
-	}
-
-	if targetID == "" {
-		return fmt.Errorf("room not found: %s", query)
-	}
-
-	e.saveState()
-
-	// Remove links from other rooms
-	for _, r := range e.data.Rooms {
-		for d, exitID := range r.Exits {
-			if exitID == targetID {
-				delete(r.Exits, d)
-			}
-		}
-	}
-
-	delete(e.data.Rooms, targetID)
-	if e.data.CurrentRoom == targetID {
-		if len(e.data.Rooms) > 0 {
-			for k := range e.data.Rooms {
-				e.data.CurrentRoom = k
-				break
-			}
-		}
+	e.undo = append(e.undo, cmd)
+	if len(e.undo) > 50 {
+		e.undo = e.undo[1:]
 	}
 	return nil
 }
@@ -864,6 +710,81 @@ func (e *Engine) ProcessMovement(input string) (processed bool, roomName string,
 	return true, "[pending room data]", nil
 }
 
+// completePendingMovement links fromRoom to an existing room in the given direction,
+// adds the reverse link if missing, sets current room, and clears pending state.
+// The caller must have already called saveState() and must hold e.mu.
+func (e *Engine) completePendingMovement(fromRoom *Room, dir Direction, existingID string, existingRoom *Room) {
+	fromRoom.Exits[dir] = existingID
+	reverse := ReverseDirection(dir)
+	if reverse != "" {
+		if _, hasReverse := existingRoom.Exits[reverse]; !hasReverse {
+			existingRoom.Exits[reverse] = fromRoom.ID
+		}
+	}
+	e.data.CurrentRoom = existingID
+	e.pendingDir = ""
+	e.pendingFromRoom = ""
+}
+
+// createRoom creates a new room at the coordinates offset from fromRoom in the
+// given direction, links it bidirectionally, and clears pending state.
+// The caller must have already called saveState() and must hold e.mu.
+func (e *Engine) createRoom(fromRoom *Room, dir Direction, id, name, description, descHash string) *Room {
+	nx, ny, nz := fromRoom.X, fromRoom.Y, fromRoom.Z
+	switch dir {
+	case North:
+		ny++
+	case South:
+		ny--
+	case East:
+		nx++
+	case West:
+		nx--
+	case NorthEast:
+		nx++
+		ny++
+	case SouthWest:
+		nx--
+		ny--
+	case NorthWest:
+		nx--
+		ny++
+	case SouthEast:
+		nx++
+		ny--
+	case Up:
+		nz++
+	case Down:
+		nz--
+	}
+
+	room := &Room{
+		ID:              id,
+		Name:            name,
+		Description:     description,
+		DescriptionHash: descHash,
+		Exits:           make(map[Direction]string),
+		X:               nx,
+		Y:               ny,
+		Z:               nz,
+	}
+
+	fromRoom.Exits[dir] = id
+	reverse := ReverseDirection(dir)
+	if reverse != "" {
+		room.Exits[reverse] = fromRoom.ID
+	}
+
+	e.data.Rooms[id] = room
+	e.hashIndex[descHash] = id
+	e.data.CurrentRoom = id
+
+	e.pendingDir = ""
+	e.pendingFromRoom = ""
+
+	return room
+}
+
 // ProcessRoomData processes incoming room data for smart auto-mapping.
 // This should be called when MUD room description text is received.
 // Returns: (wasProcessed, roomName, isLoopDetected, error)
@@ -904,83 +825,93 @@ func (e *Engine) ProcessRoomData(text string) (processed bool, roomName string, 
 	// Check if we've seen this room before (loop detection)
 	if existingID, found := e.hashIndex[hash]; found {
 		if existingRoom, ok := e.data.Rooms[existingID]; ok {
-			// Loop detected! Link to existing room instead of creating new one
 			e.saveState()
-
-			fromRoom.Exits[e.pendingDir] = existingID
-
-			// Add reverse link if it doesn't exist
-			reverse := ReverseDirection(e.pendingDir)
-			if reverse != "" {
-				if _, hasReverse := existingRoom.Exits[reverse]; !hasReverse {
-					existingRoom.Exits[reverse] = e.pendingFromRoom
-				}
-			}
-
-			e.data.CurrentRoom = existingID
-			e.pendingDir = ""
-			e.pendingFromRoom = ""
-
+			e.completePendingMovement(fromRoom, e.pendingDir, existingID, existingRoom)
 			return true, existingRoom.Name, true, nil
 		}
 	}
 
 	// New room - create it
 	e.saveState()
+	newRoom := e.createRoom(fromRoom, e.pendingDir, uuid.New().String(), "New Room", roomData.RawText, hash)
+	return true, newRoom.Name, false, nil
+}
 
-	nx, ny, nz := fromRoom.X, fromRoom.Y, fromRoom.Z
-	switch e.pendingDir {
-	case North:
-		ny++
-	case South:
-		ny--
-	case East:
-		nx++
-	case West:
-		nx--
-	case NorthEast:
-		nx++
-		ny++
-	case SouthWest:
-		nx--
-		ny--
-	case NorthWest:
-		nx--
-		ny++
-	case SouthEast:
-		nx++
-		ny--
-	case Up:
-		nz++
-	case Down:
-		nz--
+// GMCPRoom holds structured room data from a GMCP Room.Info message.
+type GMCPRoom struct {
+	Vnum        string   // Stable room ID from MUD (num/id/vnum)
+	Name        string   // Room name
+	Description string   // Room description
+	Area        string   // Optional area/zone name
+	Exits       []string // Available exit directions
+}
+
+// HandleGMCPRoomInfo processes a GMCP Room.Info message for auto-mapping.
+// If auto-mapping is off, it returns immediately.
+// If there is a pending movement, it completes the link/create logic using the
+// GMCP data (vnum for loop detection when available, otherwise description hash).
+// Returns: (wasProcessed, roomName, isLoopDetected, error)
+func (e *Engine) HandleGMCPRoomInfo(r GMCPRoom) (processed bool, roomName string, loopDetected bool, err error) {
+	if !e.IsAutoMapping() {
+		return false, "", false, nil
 	}
 
-	newRoom := &Room{
-		ID:              uuid.New().String(),
-		Name:            "New Room",
-		Description:     roomData.RawText,
-		DescriptionHash: hash,
-		Exits:           make(map[Direction]string),
-		X:               nx,
-		Y:               ny,
-		Z:               nz,
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// Normalise exit directions to the mapper's short form.
+	var exits []string
+	for _, ex := range r.Exits {
+		if d, ok := ParseDirection(ex); ok {
+			exits = append(exits, string(d))
+		} else {
+			exits = append(exits, ex)
+		}
 	}
 
-	// Link rooms
-	fromRoom.Exits[e.pendingDir] = newRoom.ID
-	reverse := ReverseDirection(e.pendingDir)
-	if reverse != "" {
-		newRoom.Exits[reverse] = e.pendingFromRoom
+	// No pending movement — just update current room info.
+	if e.pendingDir == "" {
+		if curr, ok := e.data.Rooms[e.data.CurrentRoom]; ok {
+			if r.Description != "" {
+				curr.Description = r.Description
+				curr.DescriptionHash = ComputeRoomHash(r.Description, exits)
+				e.hashIndex[curr.DescriptionHash] = curr.ID
+			}
+			if r.Name != "" {
+				curr.Name = r.Name
+			}
+		}
+		return false, "", false, nil
 	}
 
-	e.data.Rooms[newRoom.ID] = newRoom
-	e.hashIndex[hash] = newRoom.ID
-	e.data.CurrentRoom = newRoom.ID
+	fromRoom, ok := e.data.Rooms[e.pendingFromRoom]
+	if !ok {
+		e.pendingDir = ""
+		e.pendingFromRoom = ""
+		return false, "", false, fmt.Errorf("source room not found")
+	}
 
-	e.pendingDir = ""
-	e.pendingFromRoom = ""
+	// Determine room identifier: vnum is best, otherwise hash.
+	var roomID string
+	useVnum := r.Vnum != ""
+	if useVnum {
+		roomID = r.Vnum
+	} else {
+		hash := ComputeRoomHash(r.Description, exits)
+		roomID = hash
+	}
 
+	// Loop detection
+	if existingRoom, found := e.data.Rooms[roomID]; found {
+		e.saveState()
+		e.completePendingMovement(fromRoom, e.pendingDir, roomID, existingRoom)
+		return true, existingRoom.Name, true, nil
+	}
+
+	// New room
+	e.saveState()
+	descHash := ComputeRoomHash(r.Description, exits)
+	newRoom := e.createRoom(fromRoom, e.pendingDir, roomID, r.Name, r.Description, descHash)
 	return true, newRoom.Name, false, nil
 }
 

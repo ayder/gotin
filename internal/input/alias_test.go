@@ -3,6 +3,8 @@ package input
 import (
 	"reflect"
 	"testing"
+
+	"github.com/ayder/gotin/internal/command"
 )
 
 func TestAliasManager_SetAndGet(t *testing.T) {
@@ -216,13 +218,13 @@ func TestHandler_AdvancedAliasCommand(t *testing.T) {
 	h := NewHandler()
 
 	// Test new brace-delimited alias syntax
-	results := h.HandleInput("/alias {k $1} {kill $1; skin corpse}")
+	results := h.HandleInput("/alias add {k $1} {kill $1; skin corpse}")
 	if len(results) == 0 {
 		t.Fatal("Expected /alias to return results")
 	}
 	result := results[0]
-	if !result.Handled {
-		t.Errorf("Expected /alias to be handled, got response: %s", result.Response)
+	if result.Command == nil {
+		t.Errorf("Expected /alias to produce a command, got response: %s", result.Response)
 	}
 
 	// Use the alias
@@ -244,7 +246,7 @@ func TestHandler_AliasWithLocalCommand(t *testing.T) {
 	h := NewHandler()
 
 	// Set alias that includes a local command
-	h.HandleInput("/alias {bye} {say goodbye; /quit}")
+	h.HandleInput("/alias add {bye} {say goodbye; /quit}")
 
 	// Use the alias
 	results := h.HandleInput("bye")
@@ -254,7 +256,7 @@ func TestHandler_AliasWithLocalCommand(t *testing.T) {
 	}
 
 	// First command is server command
-	if results[0].IsLocal {
+	if results[0].Command != nil {
 		t.Error("Expected first command to be server command")
 	}
 	if results[0].ServerText != "say goodbye" {
@@ -262,11 +264,11 @@ func TestHandler_AliasWithLocalCommand(t *testing.T) {
 	}
 
 	// Second command is local command
-	if !results[1].IsLocal {
+	if results[1].Command == nil {
 		t.Error("Expected second command to be local command")
 	}
-	if results[1].Action != "quit" {
-		t.Errorf("Expected action 'quit', got %q", results[1].Action)
+	if _, ok := results[1].Command.(*command.Quit); !ok {
+		t.Errorf("Expected *command.Quit, got %T", results[1].Command)
 	}
 }
 
@@ -274,27 +276,27 @@ func TestHandler_AliasCommands(t *testing.T) {
 	h := NewHandler()
 
 	// Test /alias with brace syntax
-	results := h.HandleInput("/alias {hi $1} {say Hello $1; smile $1}")
-	if len(results) == 0 || !results[0].Handled {
-		t.Error("Expected /alias to be handled")
+	results := h.HandleInput("/alias add {hi $1} {say Hello $1; smile $1}")
+	if len(results) == 0 || results[0].Command == nil {
+		t.Error("Expected /alias add to produce a command")
 	}
 
-	// Test /aliases
-	results = h.HandleInput("/aliases")
-	if len(results) == 0 || !results[0].Handled {
-		t.Error("Expected /aliases to be handled")
+	// Test /alias list
+	results = h.HandleInput("/alias list")
+	if len(results) == 0 || results[0].Command == nil {
+		t.Error("Expected /alias list to produce a command")
 	}
 
-	// Test /unalias
-	results = h.HandleInput("/unalias hi")
-	if len(results) == 0 || !results[0].Handled {
-		t.Error("Expected /unalias to be handled")
+	// Test /alias remove
+	results = h.HandleInput("/alias remove hi")
+	if len(results) == 0 || results[0].Command == nil {
+		t.Error("Expected /alias remove to produce a command")
 	}
 
 	// Test removing non-existent alias
-	results = h.HandleInput("/unalias nonexistent")
-	if len(results) == 0 || results[0].Handled {
-		t.Error("Expected /unalias of non-existent to not be handled")
+	results = h.HandleInput("/alias remove nonexistent")
+	if len(results) == 0 || results[0].Command != nil {
+		t.Error("Expected /alias remove of non-existent to not produce a command")
 	}
 }
 
@@ -339,6 +341,18 @@ func TestMatchPattern(t *testing.T) {
 			pattern:  "k $1",
 			input:    "kill rat",
 			expected: nil,
+		},
+		{
+			name:    "many positional args sets $10 correctly",
+			pattern: "test",
+			input:   "test a b c d e f g h i j",
+			expected: map[string]string{
+				"$*": "a b c d e f g h i j",
+				"$1": "a",
+				"$2": "b",
+				"$9": "i",
+				"$10": "j",
+			},
 		},
 	}
 
@@ -394,6 +408,24 @@ func TestSubstituteVariables(t *testing.T) {
 			expansion: "say $*",
 			vars:      map[string]string{"$*": "hello world"},
 			expected:  "say hello world",
+		},
+		{
+			name:      "double-digit variable $10",
+			expansion: "say $10",
+			vars:      map[string]string{"$10": "tenth"},
+			expected:  "say tenth",
+		},
+		{
+			name:      "$10 does not partially replace $1",
+			expansion: "$1 and $10",
+			vars:      map[string]string{"$1": "first", "$10": "tenth"},
+			expected:  "first and tenth",
+		},
+		{
+			name:      "$1 does not leave $10 as 0",
+			expansion: "$10",
+			vars:      map[string]string{"$1": "first", "$10": "tenth"},
+			expected:  "tenth",
 		},
 	}
 

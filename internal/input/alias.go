@@ -1,9 +1,11 @@
 package input
 
 import (
+	"sort"
+	"strconv"
 	"strings"
 
-	"dmud/internal/pkg/parser"
+	"github.com/ayder/gotin/internal/parser"
 )
 
 // MaxAliasExpansionDepth limits recursive alias expansion to prevent infinite loops.
@@ -194,7 +196,7 @@ func matchPattern(pattern, input string) map[string]string {
 		vars["$*"] = strings.Join(inputParts[1:], " ")
 		// For patterns without explicit variables, map $1, $2, etc. to positional args
 		for i := 1; i < len(inputParts); i++ {
-			vars["$"+string(rune('0'+i))] = inputParts[i]
+			vars["$"+strconv.Itoa(i)] = inputParts[i]
 		}
 	}
 
@@ -206,19 +208,26 @@ func matchPattern(pattern, input string) map[string]string {
 // arguments ($*), append them to the end of the expansion.
 func substituteVariables(expansion string, vars map[string]string) string {
 	result := expansion
-	hasVariableRef := false
+	hasVariableRef := strings.Contains(expansion, "$")
 
-	// Check if expansion contains any variable references
-	if strings.Contains(expansion, "$") {
-		hasVariableRef = true
-	}
-
-	// Replace specific numbered variables first ($1, $2, ... $9)
-	for i := 9; i >= 1; i-- {
-		varName := "$" + string(rune('0'+i))
-		if val, ok := vars[varName]; ok {
-			result = strings.ReplaceAll(result, varName, val)
+	// Collect variable names (excluding $* which we handle last)
+	var names []string
+	for name := range vars {
+		if name != "$*" {
+			names = append(names, name)
 		}
+	}
+	// Sort by length descending, then lexicographically descending.
+	// This ensures $10 is replaced before $1, avoiding partial replacements.
+	sort.Slice(names, func(i, j int) bool {
+		if len(names[i]) != len(names[j]) {
+			return len(names[i]) > len(names[j])
+		}
+		return names[i] > names[j]
+	})
+
+	for _, name := range names {
+		result = strings.ReplaceAll(result, name, vars[name])
 	}
 
 	// Replace $* (all remaining arguments)

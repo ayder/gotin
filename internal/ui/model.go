@@ -1,10 +1,12 @@
 package ui
 
 import (
+	"strconv"
 	"strings"
 	"time"
 
-	"dmud/internal/input"
+	"github.com/ayder/gotin/internal/command"
+	"github.com/ayder/gotin/internal/input"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -34,13 +36,30 @@ type StatusMsg struct {
 	Message string
 }
 
-// LocalCommandMsg is sent when a local command is processed.
-type LocalCommandMsg struct {
-	Result input.CommandResult
+// ProtocolsMsg updates the badges row under the input box with the names of
+// the currently-negotiated MUD protocols (e.g. {"GMCP", "MXP"}). An empty or
+// nil slice clears the row.
+type ProtocolsMsg struct {
+	Active []string
+}
+
+// RoomNameMsg updates the room-name badge under the input box.
+// Sent when GMCP Room.Info is received. An empty string clears the badge.
+type RoomNameMsg struct {
+	Name string
 }
 
 // renderTickMsg schedules a coalesced viewport render.
 type renderTickMsg struct{}
+
+// ConfirmConnectMsg is sent by the app layer when a /connect command is
+// issued while already connected. The UI shows a confirmation widget.
+type ConfirmConnectMsg struct {
+	CurrentHost string
+	CurrentPort int
+	Host        string
+	Port        int
+}
 
 // Model represents the TUI state for the MUD client.
 type Model struct {
@@ -51,27 +70,36 @@ type Model struct {
 	ready          bool
 	width          int
 	height         int
-	content        []string // stores all lines displayed in viewport
-	statusMsg      string   // stores current status for border title
+	content          []string // stores all lines displayed in viewport
+	statusMsg        string   // stores current status for border title
+	activeProtocols  []string // negotiated MUD protocols, rendered as badges under the input box
+	currentRoomName  string   // last room name received from GMCP Room.Info
 	showHelp       bool     // whether the help widget is visible
+	showConfirmConnect bool   // whether the connection confirmation widget is visible
+	confirmHost    string   // pending connection host for confirmation widget
+	confirmPort    int      // pending connection port for confirmation widget
+	confirmCurrentHost string // current connection host for confirmation widget
+	confirmCurrentPort int    // current connection port for confirmation widget
 	contentDirty   bool     // set when appendContent modifies m.content but viewport hasn't been updated yet
 	pendingTick    bool     // true while a renderTickMsg is queued
 
 	// Channels for command routing
-	SendChan  chan<- string              // Channel to send commands to server
-	LocalChan chan<- input.CommandResult // Channel for local command actions
+	SendChan  chan<- string         // Channel to send commands to server
+	LocalChan chan<- command.Command // Channel for local command actions
 
 	// Callbacks
 	resizeCallback func(width, height int) // called when terminal is resized
 }
 
-// inputHeight is the fixed height for the input area (input line + border).
-const inputHeight = 3
+// InputHeight is the fixed height for the input area (input line + borders)
+// plus the protocol badges row rendered below it. Exported so the network
+// layer can report the content height (terminal height - chrome) via NAWS.
+const InputHeight = 4
 
 // New creates and returns a new Model with initialized components.
 // sendChan is used to send commands to the server.
 // localChan is used to send local command results for processing (quit, connect, etc.).
-func New(sendChan chan<- string, localChan chan<- input.CommandResult) Model {
+func New(sendChan chan<- string, localChan chan<- command.Command) Model {
 	ti := textinput.New()
 	ti.Placeholder = "Enter command..."
 	ti.Focus()
@@ -101,6 +129,52 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.showConfirmConnect {
+			switch msg.Type {
+			case tea.KeyCtrlC:
+				return m, tea.Quit
+			case tea.KeyEnter, tea.KeySpace:
+				m.showConfirmConnect = false
+				if m.LocalChan != nil {
+					select {
+					case m.LocalChan <- &command.ConfirmConnect{}:
+					default:
+					}
+				}
+				return m, nil
+			case tea.KeyEsc:
+				m.showConfirmConnect = false
+				if m.LocalChan != nil {
+					select {
+					case m.LocalChan <- &command.CancelConnect{}:
+					default:
+					}
+				}
+				return m, nil
+			default:
+				switch msg.String() {
+				case "y", "Y":
+					m.showConfirmConnect = false
+					if m.LocalChan != nil {
+						select {
+						case m.LocalChan <- &command.ConfirmConnect{}:
+						default:
+						}
+					}
+					return m, nil
+				case "n", "N":
+					m.showConfirmConnect = false
+					if m.LocalChan != nil {
+						select {
+						case m.LocalChan <- &command.CancelConnect{}:
+						default:
+						}
+					}
+					return m, nil
+				}
+			}
+			return m, nil
+		}
 		if m.showHelp {
 			if msg.Type == tea.KeyCtrlC {
 				return m, tea.Quit
@@ -111,6 +185,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
+		case tea.KeyCtrlH:
+			m.showHelp = !m.showHelp
+			return m, nil
 		case tea.KeyEnter:
 			value := m.textinput.Value()
 			// Process even if value is empty
@@ -122,7 +199,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Echo the original input first (for server commands)
 			hasServerCommand := false
 			for _, r := range results {
-				if !r.IsLocal {
+				if r.Command == nil && !r.ShowHelp {
 					hasServerCommand = true
 					break
 				}
@@ -150,12 +227,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			// Process each result
 			for _, result := range results {
-				if result.IsLocal {
-					// Local command - display response and send action via channel
-					if result.Action == "show_help" {
-						m.showHelp = true
-						continue
-					}
+				if result.ShowHelp {
+					m.showHelp = true
+					continue
+				}
+				if result.Command != nil {
+					// Local command - display response and send command via channel
 					if result.Response != "" {
 						trimmed := strings.TrimSpace(result.Response)
 						if strings.Contains(trimmed, "\n") {
@@ -169,10 +246,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.statusMsg = trimmed
 						}
 					}
-					// Send action to local command channel (non-blocking)
-					if m.LocalChan != nil && result.Action != "" {
+					// Send command to local command channel (non-blocking)
+					if m.LocalChan != nil {
 						select {
-						case m.LocalChan <- result:
+						case m.LocalChan <- result.Command:
 						default:
 							// Buffer full, drop or log (should not happen with 128 buffer)
 						}
@@ -234,6 +311,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+	case ConfirmConnectMsg:
+		m.showConfirmConnect = true
+		m.confirmCurrentHost = msg.CurrentHost
+		m.confirmCurrentPort = msg.CurrentPort
+		m.confirmHost = msg.Host
+		m.confirmPort = msg.Port
+		return m, nil
+
 	case SetLocalEchoMsg:
 		if msg.LocalEcho {
 			m.textinput.EchoMode = textinput.EchoNormal
@@ -264,6 +349,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMsg = trimmed
 		return m, nil
 
+	case ProtocolsMsg:
+		m.activeProtocols = append(m.activeProtocols[:0], msg.Active...)
+		return m, nil
+
+	case RoomNameMsg:
+		m.currentRoomName = msg.Name
+		return m, nil
+
 	case NetworkDataMsg:
 		m.appendContent(msg.Data)
 		var tickCmd tea.Cmd
@@ -277,7 +370,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-		viewportHeight := m.height - inputHeight
+		viewportHeight := m.height - InputHeight
 
 		if !m.ready {
 			// First time receiving window size - initialize viewport
@@ -377,7 +470,7 @@ func (m Model) View() string {
 	// Style for the viewport (no border)
 	viewportStyle := lipgloss.NewStyle().
 		Width(mm.width).
-		Height(mm.height - inputHeight)
+		Height(mm.height - InputHeight)
 
 	// Style for the input border
 	border := lipgloss.RoundedBorder()
@@ -429,29 +522,138 @@ func (m Model) View() string {
 	b.WriteString(topBorderStyle.Render(topBorder.String()))
 	b.WriteString("\n")
 	b.WriteString(inputStyle.Render(mm.textinput.View()))
+	b.WriteString("\n")
+	b.WriteString(mm.renderProtocolBadges())
 
-	return b.String()
+	view := b.String()
+
+	if mm.showConfirmConnect {
+		return mm.renderConfirmConnectWidget(view)
+	}
+
+	return view
 }
 
-// renderHelpWidget renders a centered help widget.
-func (m Model) renderHelpWidget() string {
-	helpWidth := m.width - 4
-	if helpWidth > 78 {
-		helpWidth = 78
+// renderProtocolBadges renders a single line of [NAME] badges for each
+// currently-negotiated MUD protocol. Returns an empty line (spaces) when
+// nothing is active so the layout stays stable.
+func (m Model) renderProtocolBadges() string {
+	sep := " "
+	var parts []string
+	var plainParts []string
+
+	// Yellow room-name badge (from GMCP Room.Info)
+	if m.currentRoomName != "" {
+		roomBadge := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("220")).
+			Bold(true).
+			Render("[Room: " + m.currentRoomName + "]")
+		parts = append(parts, roomBadge)
+		plainParts = append(plainParts, "[Room: "+m.currentRoomName+"]")
 	}
+
+	// Green protocol badges
+	if len(m.activeProtocols) > 0 {
+		protoStyle := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("82")).
+			Bold(true)
+		for _, name := range m.activeProtocols {
+			parts = append(parts, protoStyle.Render("["+name+"]"))
+			plainParts = append(plainParts, "["+name+"]")
+		}
+	}
+
+	if len(parts) == 0 {
+		return strings.Repeat(" ", m.width)
+	}
+
+	line := strings.Join(parts, sep)
+	plain := strings.Join(plainParts, sep)
+	if pad := m.width - lipgloss.Width(plain); pad > 0 {
+		line += strings.Repeat(" ", pad)
+	}
+	return line
+}
+
+// renderHelpWidget renders a centered help widget in two columns.
+func (m Model) renderHelpWidget() string {
+	helpWidth := m.width - 8
+	if helpWidth > 120 {
+		helpWidth = 120
+	}
+	if helpWidth < 60 {
+		helpWidth = 60
+	}
+
+	paddingX := 2
+	gap := 3
+	innerWidth := helpWidth - paddingX*2 - 2 // account for border chars
+	colWidth := (innerWidth - gap) / 2
+
+	lines := strings.Split(m.commandHandler.HelpText(), "\n")
+	mid := (len(lines) + 1) / 2
+	for i := mid; i < len(lines) && i > 0; i++ {
+		if strings.TrimSpace(lines[i]) == "" {
+			mid = i + 1
+			break
+		}
+	}
+
+	leftText := strings.Join(lines[:mid], "\n")
+	rightText := strings.Join(lines[mid:], "\n")
+
+	colStyle := lipgloss.NewStyle().Width(colWidth)
+	leftCol := colStyle.Render(leftText)
+	rightCol := colStyle.Render(rightText)
+
+	content := lipgloss.JoinHorizontal(lipgloss.Top, leftCol, strings.Repeat(" ", gap), rightCol)
 
 	border := lipgloss.RoundedBorder()
 	widgetStyle := lipgloss.NewStyle().
 		Border(border).
 		BorderForeground(lipgloss.Color("62")).
 		Background(lipgloss.Color("235")).
-		Padding(1, 2).
+		Padding(1, paddingX).
 		Width(helpWidth)
 
-	helpContent := m.commandHandler.HelpText()
-	widget := widgetStyle.Render(helpContent)
+	widget := widgetStyle.Render(content)
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, widget)
+}
+
+// renderConfirmConnectWidget renders a centered confirmation dialog over the
+// normal view when the user tries to /connect while already connected.
+func (m Model) renderConfirmConnectWidget(background string) string {
+	confirmWidth := m.width - 12
+	if confirmWidth > 80 {
+		confirmWidth = 80
+	}
+	if confirmWidth < 40 {
+		confirmWidth = 40
+	}
+
+	paddingX := 2
+
+	var lines []string
+	lines = append(lines, "Already connected to "+m.confirmCurrentHost+":"+strconv.Itoa(m.confirmCurrentPort))
+	lines = append(lines, "")
+	lines = append(lines, "Disconnect and connect to "+m.confirmHost+":"+strconv.Itoa(m.confirmPort)+"?")
+	lines = append(lines, "")
+	lines = append(lines, "[Enter/Y] Confirm    [Esc/N] Cancel")
+
+	content := strings.Join(lines, "\n")
+
+	border := lipgloss.RoundedBorder()
+	widgetStyle := lipgloss.NewStyle().
+		Border(border).
+		BorderForeground(lipgloss.Color("208")).
+		Background(lipgloss.Color("235")).
+		Padding(1, paddingX).
+		Width(confirmWidth)
+
+	widget := widgetStyle.Render(content)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, widget, lipgloss.WithWhitespaceChars(" "))
 }
 
 // GetAliases returns the current aliases from the command handler.

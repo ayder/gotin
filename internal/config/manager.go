@@ -24,13 +24,13 @@ type Config struct {
 	LastPort int `json:"last_port,omitempty"`
 }
 
-// DefaultConfigDir returns the default configuration directory (~/.termud).
+// DefaultConfigDir returns the default configuration directory (~/.gotin).
 func DefaultConfigDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".termud"), nil
+	return filepath.Join(home, ".gotin"), nil
 }
 
 // DefaultConfigPath returns the default configuration file path.

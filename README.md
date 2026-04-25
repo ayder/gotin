@@ -1,6 +1,6 @@
-# TermMud
+# Gotin
 
-**TermMud** is a modern, terminal-based MUD (Multi-User Dungeon) client written in Go. It leverages the [Bubble Tea](https://github.com/charmbracelet/bubbletea) framework to provide a responsive and rich Text User Interface (TUI).
+**Gotin** is a modern, terminal-based MUD (Multi-User Dungeon) client written in Go. It leverages the [Bubble Tea](https://github.com/charmbracelet/bubbletea) framework to provide a responsive and rich Text User Interface (TUI).
 
 ## Features
 
@@ -18,9 +18,9 @@
 
 ### Build from Source
 ```bash
-git clone https://github.com/yourusername/dmud.git
-cd dmud
-go build -o termud ./cmd/termud
+git clone https://github.com/yourusername/gotin.git
+cd gotin
+go build -o gotin ./cmd/gotin
 ```
 
 ## Usage
@@ -28,7 +28,7 @@ go build -o termud ./cmd/termud
 ### Quick Start
 Run the client and enter the "Wizard" mode to connect dynamically:
 ```bash
-./termud
+./gotin
 ```
 Then, inside the client:
 ```text
@@ -38,7 +38,7 @@ Then, inside the client:
 ### CLI Flags
 You can also connect directly via command-line flags:
 ```bash
-./termud -host t2tmud.org -port 9999
+./gotin -host t2tmud.org -port 9999
 ```
 
 -   `-host`: The MUD server hostname.
@@ -47,35 +47,39 @@ You can also connect directly via command-line flags:
 
 ## Commands
 
-TermMud uses local commands prefixed with `/` to manage the client. All other input is sent directly to the MUD server.
+Gotin uses local commands prefixed with `/` to manage the client. All other input is sent directly to the MUD server.
 
 | Command | Description | Example |
 | :--- | :--- | :--- |
 | `/connect <host> <port>` | Connect to a MUD server. | `/connect t2tmud.org 9999` |
 | `/quit` (or `/q`) | Exit the application. | `/quit` |
-| `/alias <key> <value>` | Create a text alias. | `/alias k kill` |
-| `/unalias <key>` | Remove an alias. | `/unalias k` |
-| `/aliases` | List all defined aliases. | `/aliases` |
-| `/trigger <p> <r>` | Add a trigger (Regex). | `/trigger ^Hi say Hello` |
-| `/triggers` | List all triggers. | `/triggers` |
+| `/alias add <key> <value>` | Create a text alias. | `/alias add k kill` |
+| `/alias remove <key>` | Remove an alias. | `/alias remove k` |
+| `/alias list` | List all defined aliases. | `/alias list` |
+| `/connection add <name> <host> <port> [auto]` | Save a connection alias. | `/connection add t2t t2tmud.org 9999` |
+| `/connection remove <name>` | Remove a connection alias. | `/connection remove t2t` |
+| `/connection list` | List saved connection aliases. | `/connection list` |
+| `/trigger add <p> <r>` | Add a trigger (Regex). | `/trigger add ^Hi say Hello` |
+| `/trigger remove <p>` | Remove a trigger. | `/trigger remove ^Hi` |
+| `/trigger list` | List all triggers. | `/trigger list` |
 | `/map <subcmd>` | Mapper commands (see below). | `/map show` |
 | `/help` | Show available commands. | `/help` |
 
 ## Configuration
-Configuration is stored in `~/.dmud_config.json`. It is automatically created on first run.
+Configuration is stored in `~/.gotin_config.json`. It is automatically created on first run.
 
 To manage triggers in-game:
--   `/trigger <pattern> <response>`: Add a new trigger.
--   `/untrigger <pattern>`: Remove a trigger.
--   `/triggers`: List all active triggers.
+-   `/trigger add <pattern> <response>`: Add a new trigger.
+-   `/trigger remove <pattern>`: Remove a trigger.
+-   `/trigger list`: List all active triggers.
 
 Example:
 ```text
-/trigger ^Welcome (.*) say Hello $1
+/trigger add ^Welcome (.*) say Hello $1
 ```
 
 ### The Mapper
-TermMud features a built-in mapping system to track your exploration.
+Gotin features a built-in mapping system to track your exploration.
 
 #### Creation & Loading
 | Command | Description |
@@ -134,7 +138,7 @@ n                            # Move north (auto-creates room)
 ```
 
 **Persistence:**
-Maps are saved to the file specified in `/map create`. Triggers and Aliases are saved to `~/.termud/config.json`.
+Maps are saved to the file specified in `/map create`. Triggers and Aliases are saved to `~/.gotin/config.json`.
 *Note: Patterns are Go Regular Expressions.*
 
 ## License
