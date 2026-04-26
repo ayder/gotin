@@ -1,6 +1,10 @@
 package mappane
 
-import "github.com/ayder/gotin/internal/mapper"
+import (
+	"sort"
+
+	"github.com/ayder/gotin/internal/mapper"
+)
 
 // layerHeaderLines returns the two header rows: layer label + current room
 // name. Both are padded to PaneWidth.
@@ -39,6 +43,16 @@ const (
 	glyphDiagNWSE    = '╲'
 )
 
+// orderedLayerIDs returns layer IDs in ascending order (deterministic).
+func orderedLayerIDs(layer map[string]struct{}) []string {
+	out := make([]string, 0, len(layer))
+	for id := range layer {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // bodyLines builds the map drawing area as a slice of row strings.
 func bodyLines(v View, rows int) []string {
 	if rows <= 0 {
@@ -69,14 +83,20 @@ func bodyLines(v View, rows int) []string {
 	centerCol := (cols / 2) &^ 1 // snap to even
 	centerRow := (rows / 2) &^ 1
 
-	// Place the rooms.
-	for id := range layer {
+	// Track collisions: key is "(rx,ry)" string, value is occurrence index.
+	collisions := map[[2]int]int{}
+	overlapFlagged := map[[2]int]bool{}
+	for _, id := range orderedLayerIDs(layer) {
 		r := v.Map.Rooms[id]
 		if r == nil {
 			continue
 		}
-		col := centerCol + 2*(r.X-cx) - v.PanOffset.Col
-		row := centerRow + 2*(cy-r.Y) - v.PanOffset.Row // y inverted
+		key := [2]int{r.X, r.Y}
+		nudge := collisions[key]
+		collisions[key] = nudge + 1
+
+		col := centerCol + 2*(r.X-cx) - v.PanOffset.Col + nudge
+		row := centerRow + 2*(cy-r.Y) - v.PanOffset.Row
 		if col < 0 || col >= cols || row < 0 || row >= rows {
 			continue
 		}
@@ -87,6 +107,11 @@ func bodyLines(v View, rows int) []string {
 			grid.set(col, row, glyphPlaceholder)
 		default:
 			grid.set(col, row, glyphRoom)
+		}
+
+		if nudge >= 1 && !overlapFlagged[key] {
+			grid.set(col+1, row, '!')
+			overlapFlagged[key] = true
 		}
 	}
 

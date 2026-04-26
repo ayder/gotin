@@ -67,6 +67,28 @@ func TestRender_PaneTooShort(t *testing.T) {
 	}
 }
 
+func TestRender_CoordOverlapNudgesAndFlags(t *testing.T) {
+	// a and b both live at (0,0). They share a layer because b lists a as
+	// its east neighbour even though the coordinates do not match — that
+	// link is omitted by the connectivity rule, but LayerOf still treats
+	// them as connected because BFS trusts the exit map.
+	a := makeRoom("a", 0, 0, 0); a.Name = "A"
+	b := makeRoom("b", 0, 0, 0); b.Name = "B"
+	a.Exits[mapper.West] = "b"
+	b.Exits[mapper.East] = "a"
+	m := &mapper.Map{
+		CurrentRoom: "a",
+		Rooms:       map[string]*mapper.Room{"a": a, "b": b},
+	}
+	got := Render(View{PaneWidth: 22, PaneHeight: 9, Map: m, CurrentID: "a"})
+	if !strings.ContainsRune(got, '!') {
+		t.Errorf("expected ! overlap flag in render:\n%s", got)
+	}
+	if strings.Count(got, string(glyphRoom)) < 1 {
+		t.Errorf("expected at least one normal room glyph in render:\n%s", got)
+	}
+}
+
 func TestRender_OmitsEdgeWhenCoordsDoNotMatch(t *testing.T) {
 	// A says exits[E]=B, but B's X is 5 (not 1). The link must NOT be drawn.
 	a := makeRoom("a", 0, 0, 0)
