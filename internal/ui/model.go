@@ -148,6 +148,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.mapPaneVisible && m.textinput.Value() == "" {
+			if handled, nm, cmd := m.handleMapPaneKey(msg); handled {
+				return nm, cmd
+			}
+		}
 		if m.showConfirmConnect {
 			switch msg.Type {
 			case tea.KeyCtrlC:
@@ -521,6 +526,95 @@ func (m *Model) flushViewport() {
 		m.viewport.GotoBottom()
 	}
 	m.contentDirty = false
+}
+
+// handleMapPaneKey returns (handled, model, cmd). It is invoked only when
+// the pane is visible AND the textinput is empty. It consumes pan, recenter,
+// layer-step, and Esc keys; everything else falls through to normal input
+// processing.
+func (m Model) handleMapPaneKey(msg tea.KeyMsg) (bool, tea.Model, tea.Cmd) {
+	step := 2
+	switch msg.Type {
+	case tea.KeyLeft:
+		m.mapPanOffset.Col -= step
+		return true, m, nil
+	case tea.KeyRight:
+		m.mapPanOffset.Col += step
+		return true, m, nil
+	case tea.KeyUp:
+		m.mapPanOffset.Row -= step
+		return true, m, nil
+	case tea.KeyDown:
+		m.mapPanOffset.Row += step
+		return true, m, nil
+	case tea.KeyEsc:
+		m.mapPaneVisible = false
+		m.viewport.Width = m.width
+		return true, m, nil
+	}
+	switch msg.String() {
+	case "h":
+		m.mapPanOffset.Col -= step
+		return true, m, nil
+	case "l":
+		m.mapPanOffset.Col += step
+		return true, m, nil
+	case "k":
+		m.mapPanOffset.Row -= step
+		return true, m, nil
+	case "j":
+		m.mapPanOffset.Row += step
+		return true, m, nil
+	case "c":
+		m.mapPanOffset = mappane.Point{}
+		m.mapPaneLayerKey = ""
+		return true, m, nil
+	case "[":
+		return true, m.stepLayer(-1), nil
+	case "]":
+		return true, m.stepLayer(+1), nil
+	}
+	return false, m, nil
+}
+
+// stepLayer advances the LayerKey by direction d (-1 prev, +1 next) using
+// the current snapshot. Out-of-range wraps around. Recenters pan when
+// switching.
+func (m Model) stepLayer(d int) Model {
+	if m.mapEngineSnapshot == nil {
+		return m
+	}
+	snap, currID := m.mapEngineSnapshot()
+	if snap == nil {
+		return m
+	}
+	reps := mappane.AllLayers(snap)
+	if len(reps) <= 1 {
+		return m
+	}
+	// Anchor: which rep are we currently rendering?
+	anchor := m.mapPaneLayerKey
+	if anchor == "" {
+		// Find the rep of the current room's layer.
+		for _, r := range reps {
+			la := mappane.LayerOf(snap, r)
+			if _, ok := la[currID]; ok {
+				anchor = r
+				break
+			}
+		}
+	}
+	idx := 0
+	for i, r := range reps {
+		if r == anchor {
+			idx = i
+			break
+		}
+	}
+	idx = (idx + d + len(reps)) % len(reps)
+	m.mapPaneLayerKey = reps[idx]
+	m.mapPanOffset = mappane.Point{}
+	return m
 }
 
 // scheduleRenderTick returns a Cmd that fires a renderTickMsg after ~16ms.

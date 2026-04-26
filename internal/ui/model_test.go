@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/ayder/gotin/internal/mapper"
+	"github.com/ayder/gotin/internal/ui/mappane"
 )
 
 func freshModel(termW, termH int) Model {
@@ -55,6 +56,51 @@ func TestMapPaneToggle_OffRestoresFullViewport(t *testing.T) {
 
 // quiet unused-import: mapper used by later tests.
 var _ = mapper.Direction("")
+
+func TestPaneKeys_PanOnlyWhenInputEmpty(t *testing.T) {
+	m := freshModel(80, 24)
+	mm := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{
+		"a": {ID: "a", Exits: map[mapper.Direction]string{}},
+	}}
+	m.SetMapEngineSnapshot(func() (*mapper.Map, string) { return mm, "a" })
+	tm, _ := m.Update(MapPaneToggleMsg{})
+	m = tm.(Model)
+
+	// Pane visible, input empty: 'l' should pan +2 cols.
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	m = tm.(Model)
+	if m.mapPanOffset.Col != 2 {
+		t.Errorf("pan col = %d, want 2", m.mapPanOffset.Col)
+	}
+	if m.textinput.Value() != "" {
+		t.Errorf("textinput must remain empty, got %q", m.textinput.Value())
+	}
+
+	// Now type some characters → pane keys must NOT pan.
+	m.textinput.SetValue("look")
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	m = tm.(Model)
+	if m.mapPanOffset.Col != 2 {
+		t.Errorf("pan col changed while typing: got %d", m.mapPanOffset.Col)
+	}
+}
+
+func TestPaneKeys_RecenterOnC(t *testing.T) {
+	m := freshModel(80, 24)
+	mm := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{
+		"a": {ID: "a", Exits: map[mapper.Direction]string{}},
+	}}
+	m.SetMapEngineSnapshot(func() (*mapper.Map, string) { return mm, "a" })
+	tm, _ := m.Update(MapPaneToggleMsg{})
+	m = tm.(Model)
+	m.mapPanOffset = mappane.Point{Col: 4, Row: 4}
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	m = tm.(Model)
+	if m.mapPanOffset != (mappane.Point{}) {
+		t.Errorf("expected pan reset on c, got %+v", m.mapPanOffset)
+	}
+}
 
 func TestMapPaneView_RendersSplit(t *testing.T) {
 	m := freshModel(80, 24)
