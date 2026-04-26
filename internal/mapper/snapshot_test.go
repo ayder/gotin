@@ -24,14 +24,22 @@ func TestSnapshot_DeepCopyIndependence(t *testing.T) {
 
 	// Mutate the snapshot — engine state must be unchanged.
 	snap.Rooms[currID].Name = "MUTATED"
+	snap.Rooms[currID].Exits[North] = "FAKE_ROOM_ID"
+	delete(snap.Rooms[currID].Exits, West)
 	delete(snap.Rooms, currID)
 
 	live, _ := e.Snapshot()
 	if live.Rooms[currID].Name == "MUTATED" {
-		t.Fatal("engine state was mutated through snapshot")
+		t.Fatal("engine Name was mutated through snapshot")
 	}
 	if _, ok := live.Rooms[currID]; !ok {
 		t.Fatal("engine room was deleted through snapshot")
+	}
+	if got := live.Rooms[currID].Exits[North]; got == "FAKE_ROOM_ID" {
+		t.Fatal("engine Exits map was mutated through snapshot (North inserted)")
+	}
+	if _, ok := live.Rooms[currID].Exits[West]; !ok {
+		t.Fatal("engine Exits map was mutated through snapshot (West deleted)")
 	}
 }
 

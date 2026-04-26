@@ -134,6 +134,28 @@ func (m *Model) SetMapEngineSnapshot(fn func() (*mapper.Map, string)) {
 	m.mapEngineSnapshot = fn
 }
 
+// toggleMapPane flips pane visibility, refusing to open it on a narrow
+// terminal. On open it resets pan/layer state and shrinks the chat
+// viewport; on close it restores full viewport width.
+func (m *Model) toggleMapPane() {
+	if !m.mapPaneVisible {
+		pw := computeMapPaneWidth(m.width)
+		if pw == 0 {
+			m.statusMsg = "terminal too narrow for /map show"
+			return
+		}
+		m.mapPaneVisible = true
+		m.mapPaneWidth = pw
+		m.viewport.Width = m.width - pw - 1
+		m.mapPanOffset = mappane.Point{}
+		m.mapPaneLayerKey = ""
+		return
+	}
+	m.mapPaneVisible = false
+	m.mapPaneWidth = 0
+	m.viewport.Width = m.width
+}
+
 // Init returns the initial command for the TUI.
 func (m Model) Init() tea.Cmd {
 	return textinput.Blink
@@ -229,22 +251,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case tea.KeyCtrlB:
-			if !m.mapPaneVisible {
-				pw := computeMapPaneWidth(m.width)
-				if pw == 0 {
-					m.statusMsg = "terminal too narrow for /map show"
-					return m, nil
-				}
-				m.mapPaneVisible = true
-				m.mapPaneWidth = pw
-				m.viewport.Width = m.width - pw - 1
-				m.mapPanOffset = mappane.Point{}
-				m.mapPaneLayerKey = ""
-			} else {
-				m.mapPaneVisible = false
-				m.mapPaneWidth = 0
-				m.viewport.Width = m.width
-			}
+			m.toggleMapPane()
 			return m, nil
 		case tea.KeyEnter:
 			value := m.textinput.Value()
@@ -379,22 +386,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case MapPaneToggleMsg:
-		if !m.mapPaneVisible {
-			pw := computeMapPaneWidth(m.width)
-			if pw == 0 {
-				m.statusMsg = "terminal too narrow for /map show"
-				return m, nil
-			}
-			m.mapPaneVisible = true
-			m.mapPaneWidth = pw
-			m.viewport.Width = m.width - pw - 1
-			m.mapPanOffset = mappane.Point{}
-			m.mapPaneLayerKey = ""
-		} else {
-			m.mapPaneVisible = false
-			m.mapPaneWidth = 0
-			m.viewport.Width = m.width
-		}
+		m.toggleMapPane()
 		return m, nil
 
 	case MapPaneRecenterMsg:

@@ -85,6 +85,31 @@ func TestStatusMsg_TriggersRecenterWhenCurrentRoomChanges(t *testing.T) {
 	}
 }
 
+func TestStatusMsg_DoesNotRecenterWhenRoomUnchanged(t *testing.T) {
+	m := freshModel(80, 24)
+	rooms := map[string]*mapper.Room{
+		"a": {ID: "a", Name: "A", Exits: map[mapper.Direction]string{}},
+	}
+	mm := &mapper.Map{CurrentRoom: "a", Rooms: rooms}
+	m.SetMapEngineSnapshot(func() (*mapper.Map, string) { return mm, "a" })
+	tm, _ := m.Update(MapPaneToggleMsg{})
+	m = tm.(Model)
+	want := mappane.Point{Col: 6, Row: 6}
+	m.mapPanOffset = want
+	m.mapPaneLastCurrID = "a"
+
+	// [Map] arrives but current ID hasn't changed — recenter must NOT fire.
+	tm, _ = m.Update(StatusMsg{Message: "[Map] some informational status"})
+	m = tm.(Model)
+
+	if m.mapPanOffset != want {
+		t.Errorf("pan offset reset on unchanged room: got %+v, want %+v", m.mapPanOffset, want)
+	}
+	if m.mapPaneLastCurrID != "a" {
+		t.Errorf("lastCurrID changed unexpectedly: %q", m.mapPaneLastCurrID)
+	}
+}
+
 func TestPaneKeys_EscClosesWhenEmpty(t *testing.T) {
 	m := freshModel(80, 24)
 	tm, _ := m.Update(MapPaneToggleMsg{})
