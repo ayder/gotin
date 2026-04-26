@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -54,3 +55,19 @@ func TestMapPaneToggle_OffRestoresFullViewport(t *testing.T) {
 
 // quiet unused-import: mapper used by later tests.
 var _ = mapper.Direction("")
+
+func TestMapPaneView_RendersSplit(t *testing.T) {
+	m := freshModel(80, 24)
+	// Inject a tiny snapshot accessor so the pane has something to draw.
+	rooms := map[string]*mapper.Room{
+		"a": {ID: "a", Name: "Square", Exits: map[mapper.Direction]string{}},
+	}
+	mm := &mapper.Map{CurrentRoom: "a", Rooms: rooms}
+	m.SetMapEngineSnapshot(func() (*mapper.Map, string) { return mm, "a" })
+	tm, _ := m.Update(MapPaneToggleMsg{})
+	m = tm.(Model)
+	out := m.View()
+	if !strings.Contains(out, "Square") {
+		t.Errorf("expected pane header to contain Square in:\n%s", out)
+	}
+}

@@ -604,11 +604,48 @@ func (m Model) View() string {
 
 	view := b.String()
 
+	if mm.mapPaneVisible {
+		view = mm.composeMapSplit(view)
+	}
+
 	if mm.showConfirmConnect {
 		return mm.renderConfirmConnectWidget(view)
 	}
 
 	return view
+}
+
+// composeMapSplit joins the existing left view with a freshly rendered map
+// pane on the right. The left block is split into its viewport area and the
+// status/input/badges block; only the viewport gets compressed horizontally.
+func (mm Model) composeMapSplit(leftView string) string {
+	if mm.mapEngineSnapshot == nil {
+		return leftView
+	}
+	snap, currID := mm.mapEngineSnapshot()
+	paneW := mm.mapPaneWidth
+	paneH := mm.height - InputHeight
+	pane := mappane.Render(mappane.View{
+		PaneWidth:  paneW,
+		PaneHeight: paneH,
+		Map:        snap,
+		CurrentID:  currID,
+		PanOffset:  mm.mapPanOffset,
+		LayerKey:   mm.mapPaneLayerKey,
+	})
+
+	// Split leftView into the viewport block (top, paneH lines) and the rest.
+	lines := strings.SplitN(leftView, "\n", paneH+1)
+	if len(lines) < paneH+1 {
+		// Not enough lines to cleanly compose; fall back to leftView.
+		return leftView
+	}
+	top := strings.Join(lines[:paneH], "\n")
+	rest := lines[paneH]
+
+	separator := strings.Repeat("│\n", paneH-1) + "│"
+	joined := lipgloss.JoinHorizontal(lipgloss.Top, top, separator, pane)
+	return joined + "\n" + rest
 }
 
 // renderProtocolBadges renders a single line of [NAME] badges for each
