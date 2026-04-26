@@ -228,6 +228,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.ensureHelpViewport()
 			}
 			return m, nil
+		case tea.KeyCtrlB:
+			if !m.mapPaneVisible {
+				pw := computeMapPaneWidth(m.width)
+				if pw == 0 {
+					m.statusMsg = "terminal too narrow for /map show"
+					return m, nil
+				}
+				m.mapPaneVisible = true
+				m.mapPaneWidth = pw
+				m.viewport.Width = m.width - pw - 1
+				m.mapPanOffset = mappane.Point{}
+				m.mapPaneLayerKey = ""
+			} else {
+				m.mapPaneVisible = false
+				m.mapPaneWidth = 0
+				m.viewport.Width = m.width
+			}
+			return m, nil
 		case tea.KeyEnter:
 			value := m.textinput.Value()
 			// Process even if value is empty
@@ -787,13 +805,28 @@ func (m Model) renderProtocolBadges() string {
 		}
 	}
 
+	hint := "ctrl-h for help  ctrl-b for map display"
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	hintWidth := lipgloss.Width(hintStyle.Render(hint))
+	if hintPlainWidth := len(hint); hintPlainWidth > hintWidth {
+		hintWidth = hintPlainWidth
+	}
+
 	if len(parts) == 0 {
-		return strings.Repeat(" ", m.width)
+		line := hintStyle.Render(hint)
+		if pad := m.width - hintWidth; pad > 0 {
+			line = strings.Repeat(" ", pad) + line
+		}
+		return line
 	}
 
 	line := strings.Join(parts, sep)
 	plain := strings.Join(plainParts, sep)
-	if pad := m.width - lipgloss.Width(plain); pad > 0 {
+	badgeWidth := lipgloss.Width(plain)
+	pad := m.width - badgeWidth - hintWidth - len(sep)
+	if pad > 0 {
+		line += strings.Repeat(" ", pad) + sep + hintStyle.Render(hint)
+	} else if pad := m.width - badgeWidth; pad > 0 {
 		line += strings.Repeat(" ", pad)
 	}
 	return line

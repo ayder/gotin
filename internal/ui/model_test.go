@@ -108,6 +108,47 @@ func TestPaneKeys_EscDoesNotCloseWhenTyping(t *testing.T) {
 	}
 }
 
+func TestCtrlB_TogglesMapPane(t *testing.T) {
+	m := freshModel(80, 24)
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	m = tm.(Model)
+	if !m.mapPaneVisible {
+		t.Fatal("ctrl-b should open pane")
+	}
+	if m.mapPaneWidth == 0 {
+		t.Fatal("expected nonzero pane width")
+	}
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	m = tm.(Model)
+	if m.mapPaneVisible {
+		t.Fatal("ctrl-b should close pane")
+	}
+	if m.viewport.Width != 80 {
+		t.Errorf("expected viewport restored to 80, got %d", m.viewport.Width)
+	}
+}
+
+func TestCtrlB_RejectsNarrowTerminal(t *testing.T) {
+	m := freshModel(50, 24)
+	tm, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	m = tm.(Model)
+	if m.mapPaneVisible {
+		t.Error("ctrl-b must not open pane on narrow terminal")
+	}
+}
+
+func TestProtocolBadges_ShowsHint(t *testing.T) {
+	m := freshModel(80, 24)
+	out := m.View()
+	if !strings.Contains(out, "ctrl-b for map display") {
+		t.Errorf("expected hint in view, got:\n%s", out)
+	}
+	if !strings.Contains(out, "ctrl-h for help") {
+		t.Errorf("expected help hint in view, got:\n%s", out)
+	}
+}
+
 func TestPaneKeys_PanOnlyWhenInputEmpty(t *testing.T) {
 	m := freshModel(80, 24)
 	mm := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{
