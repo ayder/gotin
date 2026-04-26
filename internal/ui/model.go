@@ -7,6 +7,8 @@ import (
 
 	"github.com/ayder/gotin/internal/command"
 	"github.com/ayder/gotin/internal/input"
+	"github.com/ayder/gotin/internal/mapper"
+	"github.com/ayder/gotin/internal/ui/mappane"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -75,6 +77,8 @@ type Model struct {
 	activeProtocols  []string // negotiated MUD protocols, rendered as badges under the input box
 	currentRoomName  string   // last room name received from GMCP Room.Info
 	showHelp       bool     // whether the help widget is visible
+	helpViewport   viewport.Model // scrollable help content
+	helpReady      bool     // helpViewport sized at least once
 	showConfirmConnect bool   // whether the connection confirmation widget is visible
 	confirmHost    string   // pending connection host for confirmation widget
 	confirmPort    int      // pending connection port for confirmation widget
@@ -82,6 +86,14 @@ type Model struct {
 	confirmCurrentPort int    // current connection port for confirmation widget
 	contentDirty   bool     // set when appendContent modifies m.content but viewport hasn't been updated yet
 	pendingTick    bool     // true while a renderTickMsg is queued
+
+	// Map pane (side-by-side renderer for /map show).
+	mapPaneVisible    bool
+	mapPaneWidth      int
+	mapPanOffset      mappane.Point
+	mapPaneLayerKey   string
+	mapPaneLastCurrID string
+	mapEngineSnapshot func() (*mapper.Map, string)
 
 	// Channels for command routing
 	SendChan  chan<- string         // Channel to send commands to server
@@ -113,6 +125,13 @@ func New(sendChan chan<- string, localChan chan<- command.Command) Model {
 		SendChan:       sendChan,
 		LocalChan:      localChan,
 	}
+}
+
+// SetMapEngineSnapshot wires a snapshot accessor into the model. The
+// accessor must be safe for concurrent use; it is invoked from the model's
+// View method and also from MapPaneRecenterMsg handling.
+func (m *Model) SetMapEngineSnapshot(fn func() (*mapper.Map, string)) {
+	m.mapEngineSnapshot = fn
 }
 
 // Init returns the initial command for the TUI.
@@ -179,14 +198,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.Type == tea.KeyCtrlC {
 				return m, tea.Quit
 			}
-			m.showHelp = false
-			return m, nil
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.showHelp = false
+				return m, nil
+			}
+			switch msg.String() {
+			case "q", "?":
+				m.showHelp = false
+				return m, nil
+			}
+			// Anything else: route to the help viewport so the user can scroll
+			// (up/down/pgup/pgdn/home/end/j/k all handled by viewport).
+			var hcmd tea.Cmd
+			m.helpViewport, hcmd = m.helpViewport.Update(msg)
+			return m, hcmd
 		}
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
 		case tea.KeyCtrlH:
 			m.showHelp = !m.showHelp
+			if m.showHelp {
+				m.ensureHelpViewport()
+			}
 			return m, nil
 		case tea.KeyEnter:
 			value := m.textinput.Value()
@@ -229,6 +264,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for _, result := range results {
 				if result.ShowHelp {
 					m.showHelp = true
+					m.ensureHelpViewport()
 					continue
 				}
 				if result.Command != nil {
@@ -383,6 +419,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.Height = viewportHeight
 		}
 
+		// Resize the help widget's viewport too if it has been initialised.
+		if m.helpReady {
+			m.helpViewport.Width = helpInnerWidth
+			m.helpViewport.Height = helpBodyHeight(m.height)
+		}
+
 		// Update text input width
 		m.textinput.Width = m.width - 5
 
@@ -494,18 +536,18 @@ func (m Model) View() string {
 
 	if titleWidth > available && available > 0 {
 		if len(titleStr) > available {
-			titleStr = " ..." + titleStr[len(titleStr)-(available-4):]
+			titleStr = titleStr[:available-4] + "... "
 			titleWidth = lipgloss.Width(titleStr)
 		}
 	}
 
 	if len(titleStr) > 0 && titleWidth <= available {
 		remaining := topBorderWidth - 2 - titleWidth - 2
+		topBorder.WriteString(strings.Repeat(border.Top, 2))
+		topBorder.WriteString(titleStr)
 		if remaining > 0 {
 			topBorder.WriteString(strings.Repeat(border.Top, remaining))
 		}
-		topBorder.WriteString(titleStr)
-		topBorder.WriteString(strings.Repeat(border.Top, 2))
 	} else {
 		if topBorderWidth-2 > 0 {
 			topBorder.WriteString(strings.Repeat(border.Top, topBorderWidth-2))
@@ -575,50 +617,63 @@ func (m Model) renderProtocolBadges() string {
 	return line
 }
 
-// renderHelpWidget renders a centered help widget in two columns.
+// helpWidgetWidth is the fixed visible width of the help widget.
+const helpWidgetWidth = 80
+
+// helpInnerWidth is the column width used for the help body and footer
+// (helpWidgetWidth minus the 2-cell padding on each side and 2 border cells).
+const helpInnerWidth = helpWidgetWidth - 2*2 - 2
+
+// helpBodyHeight returns the vertical space available for the scrollable
+// help body, given a terminal height. Reserves room for borders, padding,
+// the footer hint, and a screen margin.
+func helpBodyHeight(termHeight int) int {
+	maxBody := termHeight - 8
+	if maxBody < 6 {
+		maxBody = 6
+	}
+	body := maxBody - 2 // footer + spacer
+	if body < 4 {
+		body = 4
+	}
+	return body
+}
+
+// renderHelpWidget renders a centered, scrollable, single-column help widget
+// fixed at 80 visible columns. Sizing and content of m.helpViewport are
+// established in Update (resize / showHelp toggle); this function only
+// composes the frame around the current viewport state.
 func (m Model) renderHelpWidget() string {
-	helpWidth := m.width - 8
-	if helpWidth > 120 {
-		helpWidth = 120
-	}
-	if helpWidth < 60 {
-		helpWidth = 60
-	}
+	footer := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("244")).
+		Width(helpInnerWidth).
+		Render("↑/↓ PgUp/PgDn  Home/End  Esc/q to close")
 
-	paddingX := 2
-	gap := 3
-	innerWidth := helpWidth - paddingX*2 - 2 // account for border chars
-	colWidth := (innerWidth - gap) / 2
+	content := lipgloss.JoinVertical(lipgloss.Left, m.helpViewport.View(), "", footer)
 
-	lines := strings.Split(m.commandHandler.HelpText(), "\n")
-	mid := (len(lines) + 1) / 2
-	for i := mid; i < len(lines) && i > 0; i++ {
-		if strings.TrimSpace(lines[i]) == "" {
-			mid = i + 1
-			break
-		}
-	}
-
-	leftText := strings.Join(lines[:mid], "\n")
-	rightText := strings.Join(lines[mid:], "\n")
-
-	colStyle := lipgloss.NewStyle().Width(colWidth)
-	leftCol := colStyle.Render(leftText)
-	rightCol := colStyle.Render(rightText)
-
-	content := lipgloss.JoinHorizontal(lipgloss.Top, leftCol, strings.Repeat(" ", gap), rightCol)
-
-	border := lipgloss.RoundedBorder()
 	widgetStyle := lipgloss.NewStyle().
-		Border(border).
+		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("62")).
 		Background(lipgloss.Color("235")).
-		Padding(1, paddingX).
-		Width(helpWidth)
+		Padding(1, 2).
+		Width(helpWidgetWidth)
 
-	widget := widgetStyle.Render(content)
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, widgetStyle.Render(content))
+}
 
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, widget)
+// ensureHelpViewport (re)sizes m.helpViewport to match the current terminal
+// dimensions and reloads its content from the command handler. Idempotent.
+func (m *Model) ensureHelpViewport() {
+	bodyHeight := helpBodyHeight(m.height)
+	if !m.helpReady {
+		m.helpViewport = viewport.New(helpInnerWidth, bodyHeight)
+		m.helpReady = true
+	} else {
+		m.helpViewport.Width = helpInnerWidth
+		m.helpViewport.Height = bodyHeight
+	}
+	m.helpViewport.SetContent(m.commandHandler.HelpText())
+	m.helpViewport.GotoTop()
 }
 
 // renderConfirmConnectWidget renders a centered confirmation dialog over the
@@ -709,4 +764,21 @@ func (m Model) Width() int {
 // Height returns the current terminal height.
 func (m Model) Height() int {
 	return m.height
+}
+
+// computeMapPaneWidth returns the requested pane width given a terminal
+// width, applying the spec's clamp and minimum-chat-width rule. Returns 0
+// when the pane should not be shown.
+func computeMapPaneWidth(termW int) int {
+	if termW < 65 {
+		return 0
+	}
+	w := (termW + 2) / 3 // ceil(termW / 3)
+	if w < 24 {
+		w = 24
+	}
+	if w > 48 {
+		w = 48
+	}
+	return w
 }
