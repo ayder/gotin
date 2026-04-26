@@ -127,9 +127,10 @@ type MUDProfile struct {
 // DefaultT2TMUDProfile is the in-code default profile.
 func DefaultT2TMUDProfile() MUDProfile {
 	return MUDProfile{
-		Host:            "t2tmud.org",
-		BlockStartTag:   "expire",
-		BlockEndPattern: `\nHP:\d+ EP:\d+ \[\w+\] > `,
+		Host:          "t2tmud.org",
+		BlockStartTag: "expire",
+		// ANSI-tolerant prompt: [WA] or [\x1b[1;32mWA\x1b[0m] both match.
+		BlockEndPattern: `\nHP:\d+ EP:\d+ \[(?:\x1b\[[0-9;]*[A-Za-z])*\w+(?:\x1b\[[0-9;]*[A-Za-z])*\] > `,
 		ExitTags:        []string{"x", "xx", "t", "w", "ww", "l", "ll", "y", "yy", "z"},
 		PresenceTags:    []string{"i30", "i9"},
 		WeatherPatterns: []string{
@@ -281,7 +282,10 @@ func TestMUDProfile_Compile(t *testing.T) {
 		t.Fatal("EndRe nil")
 	}
 	if !c.EndRe.MatchString("\nHP:70 EP:70 [WA] > ") {
-		t.Errorf("EndRe should match captured prompt")
+		t.Errorf("EndRe should match captured prompt (no ANSI)")
+	}
+	if !c.EndRe.MatchString("\nHP:70 EP:70 [\x1b[1;32mWA\x1b[0m] > ") {
+		t.Errorf("EndRe should match prompt with ANSI inside brackets")
 	}
 	if len(c.WeatherR) != len(p.WeatherPatterns) {
 		t.Fatalf("WeatherR len = %d, want %d", len(c.WeatherR), len(p.WeatherPatterns))
@@ -373,9 +377,20 @@ git commit -m "feat(mapper): MUDProfile.Compile compiles regex patterns"
 
 ---
 
-## Checkpoint B — MXP tag callback
+## Checkpoint B — MXP segment sink
 
-### Task 4: `mxp.Protocol.SetTagCallback`
+This checkpoint replaces the original "tag callback" plan with a
+segment-based `Sink` API. The motivation: a single `func(name, body string)`
+callback gives subscribers the wrong text-position context — the buffer
+appends the entire `Filter(s)` return value at once, but tag callbacks
+fired mid-`Filter`. With a segment sink, `Filter` flushes its in-progress
+output to `OnText` immediately before each `OnTag` call, so the buffer's
+own `b.text.Len()` is automatically correct at the moment of every tag.
+
+The existing `Filter(s) string` API stays — non-buffer callers continue
+to receive the concatenated stripped text. The sink hooks are additive.
+
+### Task 4: `mxp.Protocol.SetSink` (segment-based interface)
 
 **Files:**
 - Modify: `internal/mudproto/mxp/mxp.go`
@@ -386,33 +401,34 @@ git commit -m "feat(mapper): MUDProfile.Compile compiles regex patterns"
 Add to `internal/mudproto/mxp/mxp_test.go`:
 
 ```go
-func TestSetTagCallback_FiresForEveryParsedTag(t *testing.T) {
+type captureSink struct {
+	events []string // formatted as "T:foo" for text, "G:name" for tag
+}
+
+func (s *captureSink) OnText(t string)        { s.events = append(s.events, "T:"+t) }
+func (s *captureSink) OnTag(name, body string) { s.events = append(s.events, "G:"+name) }
+
+func TestSetSink_InterleavesTextAndTags(t *testing.T) {
 	p := New()
-	type captured struct{ name, body string }
-	var got []captured
-	p.SetTagCallback(func(name, body string) {
-		got = append(got, captured{name, body})
-	})
+	s := &captureSink{}
+	p.SetSink(s)
 
-	_ = p.Filter("<expire><x>east</x><i30 \"orc 1\">An orc</i30>")
+	_ = p.Filter("hello<expire>world<x>east</x>!")
 
-	want := []string{"expire", "x", "/x", "i30", "/i30"}
-	if len(got) != len(want) {
-		t.Fatalf("len(got) = %d, want %d: %+v", len(got), len(want), got)
+	want := []string{"T:hello", "G:expire", "T:world", "G:x", "T:east", "G:/x", "T:!"}
+	if len(s.events) != len(want) {
+		t.Fatalf("got %v, want %v", s.events, want)
 	}
 	for i := range want {
-		if got[i].name != want[i] {
-			t.Errorf("got[%d].name = %q, want %q", i, got[i].name, want[i])
+		if s.events[i] != want[i] {
+			t.Errorf("events[%d] = %q, want %q", i, s.events[i], want[i])
 		}
-	}
-	if got[3].body != `i30 "orc 1"` {
-		t.Errorf("got[3].body = %q", got[3].body)
 	}
 }
 
-func TestSetTagCallback_NilSafe(t *testing.T) {
+func TestSetSink_NilSafe(t *testing.T) {
 	p := New()
-	// Without registering a callback, Filter must still strip cleanly.
+	// Without registering a sink, Filter must still strip cleanly.
 	out := p.Filter("<x>east</x>")
 	if out != "east" {
 		t.Errorf("Filter(\"<x>east</x>\") = %q, want \"east\"", out)
@@ -422,12 +438,26 @@ func TestSetTagCallback_NilSafe(t *testing.T) {
 
 - [ ] **Step 2: Run test**
 
-Run: `go test ./internal/mudproto/mxp/ -run TestSetTagCallback -v`
-Expected: FAIL — `SetTagCallback undefined`.
+Run: `go test ./internal/mudproto/mxp/ -run TestSetSink -v`
+Expected: FAIL — `SetSink undefined`, `Sink undefined`.
 
 - [ ] **Step 3: Implement**
 
 In `internal/mudproto/mxp/mxp.go`:
+
+Add the interface (place near the `Mode` constants, before the `Protocol` struct):
+
+```go
+// Sink receives interleaved text segments and tag observations from
+// Filter() in arrival order. A subscriber that wants to correlate tag
+// positions with text offsets can rely on the invariant: when OnTag
+// fires, all preceding text segments have already been delivered via
+// OnText.
+type Sink interface {
+	OnText(s string)
+	OnTag(name, body string)
+}
+```
 
 Add to the `Protocol` struct:
 
@@ -437,7 +467,7 @@ type Protocol struct {
 	defaultMode Mode
 	ctx         network.Context
 	onRoomName  func(name string)
-	onTag       func(name, body string)
+	sink        Sink
 	log         protolog.Logger
 	pending     string
 }
@@ -446,73 +476,154 @@ type Protocol struct {
 Add the setter (place near `SetRoomNameCallback`):
 
 ```go
-// SetTagCallback registers a sink that receives every parsed MXP tag
-// (open or close, with body text intact). Invoked from Filter() before
-// the tag is stripped from the text stream. Nil disables the callback.
-func (p *Protocol) SetTagCallback(cb func(name, body string)) {
-	p.onTag = cb
-}
+// SetSink installs a Sink that receives interleaved text segments and
+// tag observations. Nil disables sink delivery. Filter()'s string return
+// value is unaffected and continues to provide the full stripped text
+// for callers that don't need interleaving.
+func (p *Protocol) SetSink(s Sink) { p.sink = s }
 ```
 
-In `Filter`, inside the `case '<':` block, after `findTagEnd` succeeds and before `i += end + 1`:
+Refactor `Filter` to flush `b` to the sink before each tag callback. The
+cleanest shape:
 
 ```go
+func (p *Protocol) Filter(s string) string {
+	if p.pending != "" {
+		s = p.pending + s
+		p.pending = ""
+	}
+	if !strings.ContainsAny(s, "<\x1b\n") {
+		if p.sink != nil && len(s) > 0 {
+			p.sink.OnText(s)
+		}
+		return s
+	}
+	logOn := p.logEnabled()
+	if logOn && strings.ContainsAny(s, "<\x1b") {
+		p.logEvent("chunk", []byte(s), nil)
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+
+	flushText := func() {
+		if p.sink == nil {
+			return
+		}
+		if b.Len() == 0 {
+			return
+		}
+		// Slice the new bytes added since last flush.
+		// We track the flush boundary via a separate counter.
+	}
+	// Replaced flushText approach: explicit lastFlush counter.
+	lastFlush := 0
+	flush := func() {
+		if p.sink == nil {
+			return
+		}
+		if b.Len() > lastFlush {
+			p.sink.OnText(b.String()[lastFlush:])
+			lastFlush = b.Len()
+		}
+	}
+
+	for i := 0; i < len(s); {
+		ch := s[i]
+		switch ch {
 		case '<':
 			if end := findTagEnd(s[i:]); end >= 0 {
 				body := s[i+1 : i+end]
 				p.handleProbe(body)
 				p.handleRoomName(s, i+1, i+end, &b, logOn)
-				if p.onTag != nil {
-					p.onTag(extractTagName(body), body)
-				}
 				if logOn {
 					p.logEvent("tag", []byte(s[i:i+end+1]), map[string]any{"name": extractTagName(body), "body": body})
+				}
+				if p.sink != nil {
+					flush()
+					p.sink.OnTag(extractTagName(body), body)
 				}
 				i += end + 1
 				continue
 			}
+			p.pending = s[i:]
+			flush()
+			return b.String()
+		case '\x1b':
+			if n, num, ok := parseModeEsc(s[i:]); ok {
+				p.applyMode(num)
+				i += n
+				continue
+			}
+			b.WriteByte(ch)
+			i++
+		case '\n':
+			b.WriteByte(ch)
+			p.mode = p.defaultMode
+			i++
+		default:
+			b.WriteByte(ch)
+			i++
+		}
+	}
+	flush()
+	return b.String()
+}
 ```
+
+(Remove the unused `flushText` closure draft above; the final form uses
+only the `flush` closure with the `lastFlush` counter.)
 
 - [ ] **Step 4: Run tests**
 
 Run: `go test ./internal/mudproto/mxp/ -v`
-Expected: PASS for new tests; existing MXP tests unaffected.
+Expected: PASS for new tests; all existing MXP tests still green
+(behaviour without a sink is unchanged).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add internal/mudproto/mxp/mxp.go internal/mudproto/mxp/mxp_test.go
-git commit -m "feat(mxp): SetTagCallback for per-tag subscription"
+git commit -m "feat(mxp): segment-based Sink interface for interleaved tag/text"
 ```
 
 ---
 
-### Task 5: Tag callback is invoked even with split tags
+### Task 5: Sink survives split tags
 
-The Phase 1 split-tag buffering (`p.pending`) means partial tags don't fire the callback until completed. Verify this is correct.
+The Phase 1 split-tag buffering (`p.pending`) means partial tags don't
+fire the sink until completed. Verify this is correct.
 
 - [ ] **Step 1: Write the test**
 
 Add to `mxp_test.go`:
 
 ```go
-func TestSetTagCallback_FiresOnceAfterSplitCompletion(t *testing.T) {
+func TestSetSink_FiresOnceAfterSplitCompletion(t *testing.T) {
 	p := New()
-	var got []string
-	p.SetTagCallback(func(name, _ string) { got = append(got, name) })
+	s := &captureSink{}
+	p.SetSink(s)
 
 	_ = p.Filter("<x")
-	if len(got) != 0 {
-		t.Errorf("callback fired on partial tag: %v", got)
+	for _, e := range s.events {
+		if strings.HasPrefix(e, "G:") {
+			t.Errorf("tag event fired on partial tag: %q", e)
+		}
 	}
 	_ = p.Filter(">east</x>")
-	wantSeq := []string{"x", "/x"}
-	if len(got) != len(wantSeq) {
-		t.Fatalf("got %v, want %v", got, wantSeq)
+
+	var tagEvents []string
+	for _, e := range s.events {
+		if strings.HasPrefix(e, "G:") {
+			tagEvents = append(tagEvents, e[2:])
+		}
 	}
-	for i := range wantSeq {
-		if got[i] != wantSeq[i] {
-			t.Errorf("got[%d] = %q, want %q", i, got[i], wantSeq[i])
+	want := []string{"x", "/x"}
+	if len(tagEvents) != len(want) {
+		t.Fatalf("got %v, want %v", tagEvents, want)
+	}
+	for i := range want {
+		if tagEvents[i] != want[i] {
+			t.Errorf("tagEvents[%d] = %q, want %q", i, tagEvents[i], want[i])
 		}
 	}
 }
@@ -520,16 +631,15 @@ func TestSetTagCallback_FiresOnceAfterSplitCompletion(t *testing.T) {
 
 - [ ] **Step 2: Run test**
 
-Run: `go test ./internal/mudproto/mxp/ -run TestSetTagCallback_FiresOnceAfterSplitCompletion -v`
-Expected: PASS (Phase 1 split-tag buffering already handles this; the test is a regression guard).
-
-If it fails, debug Phase 1's `p.pending` flow before continuing.
+Run: `go test ./internal/mudproto/mxp/ -run TestSetSink_FiresOnceAfterSplitCompletion -v`
+Expected: PASS (Phase 1 split-tag buffering already handles this; the
+test is a regression guard).
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add internal/mudproto/mxp/mxp_test.go
-git commit -m "test(mxp): tag callback fires once after split-tag completion"
+git commit -m "test(mxp): sink fires once after split-tag completion"
 ```
 
 **CHECKPOINT B complete.**
@@ -794,6 +904,23 @@ func TestRoomBlockBuffer_OnText_PromptClosesBlock(t *testing.T) {
 	}
 	if b.open {
 		t.Errorf("buffer should be closed after emit")
+	}
+}
+
+func TestRoomBlockBuffer_OnText_PromptWithANSIClosesBlock(t *testing.T) {
+	p := DefaultT2TMUDProfile()
+	cp, _ := p.Compile()
+	var emitted []RoomBlock
+	b := NewRoomBlockBuffer(cp, func(rb RoomBlock) { emitted = append(emitted, rb) })
+	b.OnTag("expire", "expire")
+	b.OnText("    A room.\n    The only obvious exit is north.")
+	// Real t2tmud prompt has ANSI inside the brackets.
+	b.OnText("\nHP:70 EP:70 [\x1b[1;32mWA\x1b[0m] > ")
+	if len(emitted) != 1 {
+		t.Fatalf("expected exactly 1 emission with ANSI prompt, got %d", len(emitted))
+	}
+	if b.open {
+		t.Errorf("buffer should be closed after ANSI prompt")
 	}
 }
 ```
@@ -1224,8 +1351,14 @@ func TestComputeStructuralHash_DifferentExitsDiffer(t *testing.T) {
 func TestComputeStructuralHash_DistinctFromV1(t *testing.T) {
 	v2 := ComputeStructuralHash("A room.", []string{"n"})
 	v1 := ComputeRoomHash("A room.", []string{"n"})
+	if !strings.HasPrefix(v2, "v2:") {
+		t.Errorf("v2 hash missing prefix: %q", v2)
+	}
 	if v1 == v2 {
 		t.Errorf("v1 and v2 hashes must not collide")
+	}
+	if strings.HasPrefix(v1, "v2:") {
+		t.Errorf("v1 hash unexpectedly has v2 prefix: %q", v1)
 	}
 }
 ```
@@ -1258,15 +1391,17 @@ func normaliseDescription(s string) string {
 }
 
 // ComputeStructuralHash builds a Phase 2 room-identity hash from a cleaned
-// description and a sorted, de-duplicated exit set. Prefixed "v2|" so
-// values cannot collide with the legacy ComputeRoomHash output.
+// description and a sorted, de-duplicated exit set. The returned value
+// is prefixed "v2:" so it is externally distinguishable from legacy
+// ComputeRoomHash output (plain 64-hex). The prefix doubles as a debug
+// aid when grepping saved maps and JSON logs.
 func ComputeStructuralHash(desc string, exits []string) string {
 	norm := normaliseDescription(desc)
 	sortedExits := append([]string(nil), exits...)
 	sort.Strings(sortedExits)
 	payload := "v2|" + norm + "|" + strings.Join(sortedExits, ",")
 	h := sha256.Sum256([]byte(payload))
-	return hex.EncodeToString(h[:])
+	return "v2:" + hex.EncodeToString(h[:])
 }
 ```
 
@@ -1286,7 +1421,22 @@ git commit -m "feat(mapper): ComputeStructuralHash with v2 prefix"
 
 ---
 
-### Task 12: Engine state for profile + block-start sentinel
+### Task 12: Engine state for profile + dual MXP/block-start sentinels
+
+The "MXP active" gate cannot rely on `Installed()` (always true if
+compiled in) or `ActiveProtocols()` (true under `AlwaysActive` even
+pre-negotiation, see `internal/mudproto/mxp/mxp.go:97`). The only proof
+that MXP is genuinely working on this connection is **observation of an
+actual MXP-emitted tag**. We therefore introduce TWO independent
+sentinels:
+
+- `sawMXP` — flipped on every MXP tag arrival. Means "MXP is active".
+- `sawBlockStart` — flipped on the configured `BlockStartTag` tag
+  arrival (a strict subset of `sawMXP`). Means "we have observable
+  block boundaries on this MUD".
+
+`ProcessMovement` requires BOTH to be true (Task 15). `ResetBlockStart`
+clears BOTH on disconnect.
 
 **Files:**
 - Modify: `internal/mapper/mapper.go`
@@ -1310,25 +1460,38 @@ func TestEngineMUDProfile_RoundTrip(t *testing.T) {
 	}
 }
 
-func TestEngineBlockStartSentinel(t *testing.T) {
+func TestEngineSentinels(t *testing.T) {
 	e := NewEngine("")
+	if e.HasMXPSeen() {
+		t.Errorf("default HasMXPSeen must be false")
+	}
 	if e.HasBlockStartSeen() {
-		t.Errorf("default sentinel must be false")
+		t.Errorf("default HasBlockStartSeen must be false")
+	}
+	e.MarkMXPSeen()
+	if !e.HasMXPSeen() {
+		t.Errorf("MarkMXPSeen did not set sawMXP")
+	}
+	if e.HasBlockStartSeen() {
+		t.Errorf("MarkMXPSeen must NOT set sawBlockStart")
 	}
 	e.MarkBlockStartSeen()
 	if !e.HasBlockStartSeen() {
-		t.Errorf("MarkBlockStartSeen did not set the sentinel")
+		t.Errorf("MarkBlockStartSeen did not set sawBlockStart")
 	}
 	e.ResetBlockStart()
+	if e.HasMXPSeen() {
+		t.Errorf("ResetBlockStart did not clear sawMXP")
+	}
 	if e.HasBlockStartSeen() {
-		t.Errorf("ResetBlockStart did not clear the sentinel")
+		t.Errorf("ResetBlockStart did not clear sawBlockStart")
 	}
 }
 ```
 
 - [ ] **Step 2: Run tests**
 
-Run: `go test ./internal/mapper/ -run "TestEngineMUDProfile|TestEngineBlockStartSentinel" -v`
+Run: `go test ./internal/mapper/ -run "TestEngineMUDProfile|TestEngineSentinels" -v`
 Expected: FAIL — methods undefined.
 
 - [ ] **Step 3: Implement**
@@ -1339,6 +1502,7 @@ In `internal/mapper/mapper.go`, add fields to `Engine`:
 type Engine struct {
 	// ...existing fields...
 	profile         MUDProfile
+	sawMXP          bool
 	sawBlockStart   bool
 	structuralIndex map[string]string // v2 hash -> RoomID
 }
@@ -1380,40 +1544,61 @@ func (e *Engine) GetMUDProfile() MUDProfile {
 	return e.profile
 }
 
+// MarkMXPSeen flags that at least one MXP-emitted tag has been observed
+// on the current connection — the only reliable proof that MXP is
+// active end-to-end (Installed and ActiveProtocols both lie under
+// AlwaysActive). Auto-mapping requires this AND the block-start
+// sentinel.
+func (e *Engine) MarkMXPSeen() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.sawMXP = true
+}
+
+// HasMXPSeen reports whether any MXP tag has been observed yet.
+func (e *Engine) HasMXPSeen() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.sawMXP
+}
+
 // MarkBlockStartSeen flags that the configured block-start tag has been
-// observed at least once on this connection. The Phase 2 auto-mapper
-// refuses to operate before this flag is set.
+// observed at least once on this connection. Auto-mapping requires this
+// AND HasMXPSeen.
 func (e *Engine) MarkBlockStartSeen() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.sawBlockStart = true
 }
 
-// ResetBlockStart clears the sentinel; called on disconnect.
-func (e *Engine) ResetBlockStart() {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.sawBlockStart = false
-}
-
-// HasBlockStartSeen reports the current sentinel state.
+// HasBlockStartSeen reports the current block-start sentinel state.
 func (e *Engine) HasBlockStartSeen() bool {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.sawBlockStart
 }
+
+// ResetBlockStart clears BOTH MXP-seen and block-start sentinels.
+// Called by app.go on disconnect so a stale flag from a previous
+// connection cannot leak into a fresh non-MXP one.
+func (e *Engine) ResetBlockStart() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.sawMXP = false
+	e.sawBlockStart = false
+}
 ```
 
 - [ ] **Step 4: Run tests**
 
-Run: `go test ./internal/mapper/ -run "TestEngineMUDProfile|TestEngineBlockStartSentinel" -v -race`
+Run: `go test ./internal/mapper/ -run "TestEngineMUDProfile|TestEngineSentinels" -v -race`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add internal/mapper/mapper.go internal/mapper/mapper_test.go
-git commit -m "feat(mapper): Engine MUDProfile + block-start sentinel"
+git commit -m "feat(mapper): Engine MUDProfile + sawMXP/sawBlockStart sentinels"
 ```
 
 ---
@@ -1440,13 +1625,25 @@ func TestHandleRoomBlock_NoOpWhenAutoMappingOff(t *testing.T) {
 	}
 }
 
-func TestHandleRoomBlock_NoOpWhenSentinelMissing(t *testing.T) {
+func TestHandleRoomBlock_NoOpWhenMXPSeenMissing(t *testing.T) {
 	e := NewEngine("")
 	_ = e.Create("")
 	e.StartAutoMapping()
+	e.MarkBlockStartSeen() // sawBlockStart only — MXP-seen not set.
 	processed, _, _, _ := e.HandleRoomBlock(RoomBlock{Description: "x", Exits: []string{"n"}})
 	if processed {
-		t.Errorf("processed=true without block-start sentinel")
+		t.Errorf("processed=true without sawMXP sentinel")
+	}
+}
+
+func TestHandleRoomBlock_NoOpWhenBlockStartMissing(t *testing.T) {
+	e := NewEngine("")
+	_ = e.Create("")
+	e.StartAutoMapping()
+	e.MarkMXPSeen() // sawMXP only — sawBlockStart not set.
+	processed, _, _, _ := e.HandleRoomBlock(RoomBlock{Description: "x", Exits: []string{"n"}})
+	if processed {
+		t.Errorf("processed=true without sawBlockStart sentinel")
 	}
 }
 
@@ -1455,6 +1652,7 @@ func TestHandleRoomBlock_PendingMovementCreatesNewRoom(t *testing.T) {
 	_ = e.Create("")
 	e.SetMappingOptions(MappingOptions{Vnum: false, Hash: true})
 	e.StartAutoMapping()
+	e.MarkMXPSeen()
 	e.MarkBlockStartSeen()
 	if _, _, err := e.ProcessMovement("n"); err != nil {
 		t.Fatalf("ProcessMovement: %v", err)
@@ -1478,6 +1676,7 @@ func TestHandleRoomBlock_LoopDetectionByStructuralHash(t *testing.T) {
 	_ = e.Create("")
 	e.SetMappingOptions(MappingOptions{Vnum: false, Hash: true})
 	e.StartAutoMapping()
+	e.MarkMXPSeen()
 	e.MarkBlockStartSeen()
 
 	// First visit: dig n.
@@ -1530,7 +1729,7 @@ func (e *Engine) HandleRoomBlock(b RoomBlock) (processed bool, roomName string, 
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if !e.sawBlockStart {
+	if !e.sawMXP || !e.sawBlockStart {
 		return false, "", false, nil
 	}
 
@@ -1705,6 +1904,7 @@ func TestEngineLoad_RebuildsStructuralIndex(t *testing.T) {
 	}
 	e.SetMappingOptions(MappingOptions{Vnum: false, Hash: true})
 	e.StartAutoMapping()
+	e.MarkMXPSeen()
 	e.MarkBlockStartSeen()
 	_, _, _ = e.ProcessMovement("n")
 	_, _, _, _ = e.HandleRoomBlock(RoomBlock{Description: "Plaza.", Exits: []string{"s"}})
@@ -1730,15 +1930,28 @@ func TestEngineLoad_RebuildsStructuralIndex(t *testing.T) {
 Run: `go test ./internal/mapper/ -run TestEngineLoad_RebuildsStructuralIndex -v`
 Expected: FAIL — load path doesn't populate `structuralIndex`.
 
-- [ ] **Step 3: Modify `rebuildHashIndex` to also populate the structural index**
+- [ ] **Step 3: Modify `rebuildHashIndex` to populate both indices unconditionally**
+
+We deliberately do NOT recompute hashes on load. Recomputing would fail
+when stored `Room.Exits` (graph edges actually mapped) is a strict
+subset of the exit set the original `RoomBlock` carried — in that case
+the recomputed v2 hash would not match the stored `DescriptionHash` and
+the room would silently be misclassified. Instead, populate both indices
+with every saved hash and let the lookup priority in `HandleRoomBlock`
+(structural first) and `HandleGMCPRoomInfo` (legacy first) consult the
+right index per code path.
+
+Cross-version hash collision risk is negligible — `ComputeStructuralHash`
+emits a `v2:`-prefixed value (Task 11), so v2 entries cannot accidentally
+appear in the legacy lookup either; they just won't match a v1 input.
 
 In `internal/mapper/mapper.go`, replace the existing `rebuildHashIndex`:
 
 ```go
 // rebuildHashIndex rebuilds both the Phase 1 hashIndex and the Phase 2
-// structuralIndex from existing rooms after a load. Hashes prefixed
-// with the v2 marker (recognisable by length + magic) go into the v2
-// index; everything else stays in the legacy index. Caller must hold e.mu.
+// structuralIndex from existing rooms after a load. Every saved hash
+// is inserted into both maps; the lookup priority in the caller decides
+// which index is consulted. Caller must hold e.mu.
 func (e *Engine) rebuildHashIndex() {
 	e.hashIndex = make(map[string]string)
 	e.structuralIndex = make(map[string]string)
@@ -1746,19 +1959,8 @@ func (e *Engine) rebuildHashIndex() {
 		if room.DescriptionHash == "" {
 			continue
 		}
-		// Both v1 and v2 hashes are 64 hex chars (sha256). Distinguish by
-		// recomputing v2 from the room's stored description+exits and
-		// comparing — if it matches, it's v2; else it's legacy.
-		exitDirs := make([]string, 0, len(room.Exits))
-		for d := range room.Exits {
-			exitDirs = append(exitDirs, string(d))
-		}
-		v2 := ComputeStructuralHash(room.Description, exitDirs)
-		if v2 == room.DescriptionHash {
-			e.structuralIndex[room.DescriptionHash] = id
-		} else {
-			e.hashIndex[room.DescriptionHash] = id
-		}
+		e.hashIndex[room.DescriptionHash] = id
+		e.structuralIndex[room.DescriptionHash] = id
 	}
 }
 ```
@@ -1786,29 +1988,44 @@ git commit -m "feat(mapper): rebuildHashIndex populates v2 structural index on l
 
 ## Checkpoint E — Strict gate + `/map start` warning
 
-### Task 15: `ProcessMovement` requires the block-start sentinel
+### Task 15: `ProcessMovement` requires both sentinels
 
 **Files:**
 - Modify: `internal/mapper/mapper.go`
 - Modify: `internal/mapper/mapper_test.go`
 
-- [ ] **Step 1: Write failing test**
+- [ ] **Step 1: Write failing tests**
 
 Append:
 
 ```go
-func TestProcessMovement_RequiresBlockStartSentinel(t *testing.T) {
+func TestProcessMovement_RequiresMXPSeen(t *testing.T) {
 	e := NewEngine("")
 	_ = e.Create("")
 	e.SetMappingOptions(MappingOptions{Vnum: false, Hash: true})
 	e.StartAutoMapping()
-	// sawBlockStart NOT set.
+	e.MarkBlockStartSeen() // only block-start; MXP-seen missing.
 	processed, _, err := e.ProcessMovement("n")
 	if err != nil {
 		t.Fatalf("ProcessMovement: %v", err)
 	}
 	if processed {
-		t.Errorf("ProcessMovement processed=true without block-start sentinel")
+		t.Errorf("processed=true without sawMXP sentinel")
+	}
+	if e.HasPendingMovement() {
+		t.Errorf("pending state set without sentinel")
+	}
+}
+
+func TestProcessMovement_RequiresBlockStartSeen(t *testing.T) {
+	e := NewEngine("")
+	_ = e.Create("")
+	e.SetMappingOptions(MappingOptions{Vnum: false, Hash: true})
+	e.StartAutoMapping()
+	e.MarkMXPSeen() // only MXP-seen; block-start missing.
+	processed, _, _ := e.ProcessMovement("n")
+	if processed {
+		t.Errorf("processed=true without sawBlockStart sentinel")
 	}
 	if e.HasPendingMovement() {
 		t.Errorf("pending state set without sentinel")
@@ -1816,10 +2033,10 @@ func TestProcessMovement_RequiresBlockStartSentinel(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test**
+- [ ] **Step 2: Run tests**
 
-Run: `go test ./internal/mapper/ -run TestProcessMovement_RequiresBlockStartSentinel -v`
-Expected: FAIL — `ProcessMovement` doesn't gate on the sentinel.
+Run: `go test ./internal/mapper/ -run TestProcessMovement_Requires -v`
+Expected: FAIL — `ProcessMovement` doesn't yet gate on both sentinels.
 
 - [ ] **Step 3: Update `ProcessMovement`**
 
@@ -1830,7 +2047,7 @@ func (e *Engine) ProcessMovement(input string) (processed bool, roomName string,
 	if !e.IsAutoMapping() {
 		return false, "", nil
 	}
-	if !e.HasBlockStartSeen() {
+	if !e.HasMXPSeen() || !e.HasBlockStartSeen() {
 		return false, "", nil
 	}
 	// ...rest unchanged...
@@ -1840,11 +2057,18 @@ func (e *Engine) ProcessMovement(input string) (processed bool, roomName string,
 - [ ] **Step 4: Run tests**
 
 Run: `go test ./internal/mapper/ -run TestProcessMovement -v -race`
-Expected: PASS for new test; existing pending-movement tests must call `e.MarkBlockStartSeen()` after `e.StartAutoMapping()`.
+Expected: PASS for new tests; existing pending-movement tests must call BOTH `e.MarkMXPSeen()` and `e.MarkBlockStartSeen()` after `e.StartAutoMapping()`.
 
 - [ ] **Step 5: Update existing tests that call `ProcessMovement`**
 
-Run the full suite: `go test ./internal/mapper/ -v`. For every failure that is a previously-green test now failing because `ProcessMovement` returns `processed=false`, add `e.MarkBlockStartSeen()` immediately after the `e.StartAutoMapping()` line in that test.
+Run the full suite: `go test ./internal/mapper/ -v`. For every failure that is a previously-green test now failing because `ProcessMovement` returns `processed=false`, add BOTH:
+
+```go
+e.MarkMXPSeen()
+e.MarkBlockStartSeen()
+```
+
+immediately after the `e.StartAutoMapping()` line in that test.
 
 Run again until all pass.
 
@@ -1852,7 +2076,7 @@ Run again until all pass.
 
 ```bash
 git add internal/mapper/mapper.go internal/mapper/mapper_test.go
-git commit -m "feat(mapper): ProcessMovement gates on block-start sentinel"
+git commit -m "feat(mapper): ProcessMovement gates on sawMXP + sawBlockStart"
 ```
 
 ---
@@ -1861,6 +2085,21 @@ git commit -m "feat(mapper): ProcessMovement gates on block-start sentinel"
 
 App-level. The warning is a status message; the mapper still flips
 `autoMapping=true` so a later reconnect with MXP will pick up.
+
+The MXP-active check uses `HasMXPSeen()` rather than walking
+`ActiveProtocols()` because `ActiveProtocols` returns true under
+`AlwaysActive` even when negotiation hasn't completed (or has been
+declined). `HasMXPSeen` is set exclusively by an actual tag arrival —
+the only reliable proof that MXP works end-to-end.
+
+Caveat: if the user runs `/map start` immediately after connect, no
+tag may have arrived yet (the server typically sends `<expire>` only
+on the first room render). In that case the warning fires even though
+MXP will become active a moment later. We accept this — the warning is
+informational, not blocking, and the user can simply re-issue
+`/map start` after their first room arrives, or just trust that the
+gate inside `ProcessMovement` will silently start auto-mapping the
+moment both sentinels are set.
 
 **Files:**
 - Modify: `internal/app/app.go` (`MapStart` dispatch handler)
@@ -1881,17 +2120,11 @@ Replace the existing block with:
 			}
 		}
 		s.mapEngine.StartAutoMapping()
-		mxpActive := false
-		if cl := s.client.Load(); cl != nil {
-			for _, name := range cl.ActiveProtocols() {
-				if name == "MXP" {
-					mxpActive = true
-					break
-				}
-			}
-		}
-		if !mxpActive {
-			s.program.Send(ui.StatusMsg{Message: "[Map] Auto-mapping enabled, but MXP is not active on this connection. /map dig still works manually; auto-rooms will not appear until you reconnect with MXP enabled.\n"})
+		// "MXP active" = at least one MXP tag observed on this connection.
+		// Don't trust ActiveProtocols (returns true under AlwaysActive
+		// even pre-negotiation).
+		if !s.mapEngine.HasMXPSeen() {
+			s.program.Send(ui.StatusMsg{Message: "[Map] Auto-mapping enabled, but no MXP tags have been observed yet. /map dig still works manually; auto-rooms will appear once the server emits MXP-wrapped room data.\n"})
 		} else {
 			r := s.mapEngine.GetCurrent()
 			if r != nil {
@@ -2041,21 +2274,26 @@ In `connect()`, after the block from Task 17 (and before the MXP `SetRoomNameCal
 	}
 ```
 
-- [ ] **Step 3: Install the tag callback**
+- [ ] **Step 3: Install the segment Sink**
 
-Update the MXP-callback block (around `app.go:388`):
+Update the MXP-callback block (around `app.go:388`). Use a small adapter
+type so MXP-seen and block-start tracking happen independently of the
+buffer's existence:
 
 ```go
 	if m := findMXP(c); m != nil {
 		profile := s.mapEngine.GetMUDProfile()
 		blockStartTag := profile.BlockStartTag
-		m.SetTagCallback(func(name, body string) {
-			if name == blockStartTag {
-				s.mapEngine.MarkBlockStartSeen()
-			}
-			if s.roomBuf != nil {
-				s.roomBuf.OnTag(name, body)
-			}
+		var inner mxp.Sink
+		if s.roomBuf != nil {
+			inner = s.roomBuf
+		} else {
+			inner = noopSink{}
+		}
+		m.SetSink(sentinelSink{
+			inner:         inner,
+			engine:        s.mapEngine,
+			blockStartTag: blockStartTag,
 		})
 		m.SetRoomNameCallback(func(name string) {
 			if name == "" {
@@ -2066,6 +2304,43 @@ Update the MXP-callback block (around `app.go:388`):
 		})
 	}
 ```
+
+Add the adapter types near the bottom of `app.go` (above
+`historyFilePath`):
+
+```go
+// sentinelSink wraps a mapper Sink so every observed MXP tag updates the
+// engine's MXP-seen and (when the tag matches the configured
+// block-start tag) block-start sentinels, regardless of whether a
+// buffer is currently installed.
+type sentinelSink struct {
+	inner         mxp.Sink
+	engine        *mapper.Engine
+	blockStartTag string
+}
+
+func (s sentinelSink) OnText(t string) { s.inner.OnText(t) }
+
+func (s sentinelSink) OnTag(name, body string) {
+	s.engine.MarkMXPSeen()
+	if name == s.blockStartTag {
+		s.engine.MarkBlockStartSeen()
+	}
+	s.inner.OnTag(name, body)
+}
+
+// noopSink swallows sink calls; used when the buffer isn't constructed
+// (profile-compile failure or MXP not installed). Sentinel tracking
+// still wraps it so HasMXPSeen reflects reality.
+type noopSink struct{}
+
+func (noopSink) OnText(string)     {}
+func (noopSink) OnTag(string, string) {}
+```
+
+`mapper.RoomBlockBuffer` must satisfy `mxp.Sink`. Confirm its method set
+matches: `OnText(string)` and `OnTag(name, body string)` — already the
+case from Tasks 7 and 8.
 
 - [ ] **Step 4: Build**
 
@@ -2109,7 +2384,11 @@ git commit -m "feat(app): wire RoomBlockBuffer with MXP tag callback"
 
 ---
 
-### Task 19: Retire `ProcessRoomData`/`HandleGMCPRoomInfo` from production paths; route text to buffer
+### Task 19: Retire `ProcessRoomData`/`HandleGMCPRoomInfo` from production paths
+
+The buffer no longer needs explicit text pushes — the MXP `Sink` (Task 18)
+already routes interleaved text and tag segments into the buffer at the
+correct positions. `onData` just removes the Phase 1 calls.
 
 **Files:**
 - Modify: `internal/app/app.go`
@@ -2121,6 +2400,9 @@ Replace the existing block (around `app.go:496–513`) that calls `ProcessRoomDa
 ```go
 func (s *Session) onData(c *network.Client, lb *logic.LineBuffer, proc *logic.Processor, data string) {
 	if m := findMXP(c); m != nil {
+		// Filter() drives the installed Sink (Task 18) for interleaved
+		// text + tag segments. Its return value still carries the full
+		// stripped text for the UI viewport.
 		data = m.Filter(data)
 	}
 	s.trySendUI(ui.NetworkDataMsg{Data: data})
@@ -2128,10 +2410,6 @@ func (s *Session) onData(c *network.Client, lb *logic.LineBuffer, proc *logic.Pr
 	logicLines := lb.Feed([]byte(data))
 	for _, line := range logicLines {
 		proc.ProcessLine(line)
-	}
-
-	if s.roomBuf != nil {
-		s.roomBuf.OnText(data)
 	}
 }
 ```
@@ -2354,9 +2632,9 @@ func loadFixture(t *testing.T, name string) string {
 	return string(b)
 }
 
-// drive feeds a fixture through a fresh MXP Protocol whose tag and
-// post-strip text are routed to a RoomBlockBuffer. Returns the emitted
-// RoomBlocks in order.
+// drive feeds a fixture through a fresh MXP Protocol whose interleaved
+// text + tag stream is routed into a RoomBlockBuffer via SetSink.
+// Returns the emitted RoomBlocks in order.
 func drive(t *testing.T, fixtures []string) []RoomBlock {
 	t.Helper()
 	cp, err := DefaultT2TMUDProfile().Compile()
@@ -2367,11 +2645,10 @@ func drive(t *testing.T, fixtures []string) []RoomBlock {
 	buf := NewRoomBlockBuffer(cp, func(rb RoomBlock) { emitted = append(emitted, rb) })
 
 	p := mxp.New()
-	p.SetTagCallback(buf.OnTag)
+	p.SetSink(buf)
 	for _, name := range fixtures {
 		raw := loadFixture(t, name)
-		clean := p.Filter(raw)
-		buf.OnText(clean)
+		_ = p.Filter(raw) // drives the sink; return value unused here
 	}
 	return emitted
 }
@@ -2542,13 +2819,14 @@ gh pr create --title "Mapper Phase 2: structural MXP path with t2tmud profile" \
 ## Self-Review
 
 **Spec coverage:**
-- ✅ Strict gate (MXP active + `<expire>` seen) — Tasks 15, 16, 18.
+- ✅ Strict gate (MXP-seen sentinel + block-start sentinel) — Tasks 12, 15, 16, 18.
 - ✅ Hard-coded t2tmud profile + JSON override — Tasks 1–3, 17.
-- ✅ MXP tag callback infrastructure — Tasks 4–5.
+- ✅ MXP segment Sink (correct text/tag interleaving) — Tasks 4–5.
+- ✅ ANSI-tolerant prompt regex — Tasks 1, 8.
 - ✅ RoomBlockBuffer with split-chunk safety — Tasks 6–10.
-- ✅ Structural hash with v2 prefix — Task 11.
-- ✅ Engine sentinel + HandleRoomBlock — Tasks 12–13.
-- ✅ Index rebuild on load preserves Phase 1 maps — Task 14.
+- ✅ Structural hash with externally visible v2: prefix — Task 11.
+- ✅ Engine dual sentinels + HandleRoomBlock — Tasks 12–13.
+- ✅ Index rebuild populates both maps unconditionally — Task 14.
 - ✅ ProcessRoomData / HandleGMCPRoomInfo retired from production — Task 19.
 - ✅ Buffer reset on disconnect — Task 19.
 - ✅ `mud_profiles` JSON shape — Tasks 17, 20.
@@ -2560,10 +2838,11 @@ gh pr create --title "Mapper Phase 2: structural MXP path with t2tmud profile" \
 - `RoomBlock` field names (`Description`, `Exits`, `Presence`, `Vnum`,
   `Name`) match between `blockbuf.go`, `mapper.go HandleRoomBlock`, and
   `app.go onRoomBlock`.
-- `Engine.{SetMUDProfile, MarkBlockStartSeen, ResetBlockStart, HasBlockStartSeen, HandleRoomBlock}`
+- `Engine.{SetMUDProfile, MarkMXPSeen, MarkBlockStartSeen, ResetBlockStart, HasMXPSeen, HasBlockStartSeen, HandleRoomBlock}`
   match between mapper.go and app.go callers.
-- `mxp.SetTagCallback(func(name, body string))` matches what app.go's
-  closure passes to `RoomBlockBuffer.OnTag(name, body)`.
+- `mxp.Sink` interface (`OnText(string)`, `OnTag(name, body string)`)
+  matches `RoomBlockBuffer`'s method set; `sentinelSink` adapter wraps
+  the buffer to drive engine sentinels.
 
 **Placeholder scan:** No "TBD" / "TODO" / vague guidance. Every code step
 shows complete code; every regex is explicit.
