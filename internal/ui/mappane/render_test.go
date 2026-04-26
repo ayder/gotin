@@ -67,6 +67,46 @@ func TestRender_PaneTooShort(t *testing.T) {
 	}
 }
 
+func TestRender_TwoLayers_DefaultShowsCurrent(t *testing.T) {
+	a := makeRoom("a", 0, 0, 0); a.Name = "Square"
+	b := makeRoom("b", 0, 0, 1); b.Name = "Loft"
+	a.Exits[mapper.Up] = "b"
+	b.Exits[mapper.Down] = "a"
+	m := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{"a": a, "b": b}}
+	got := Render(View{PaneWidth: 30, PaneHeight: 7, Map: m, CurrentID: "a"})
+	lines := strings.Split(got, "\n")
+	if !strings.HasPrefix(strings.TrimRight(lines[0], " "), "Square") {
+		t.Errorf("expected layer label to start with Square, got %q", lines[0])
+	}
+	// Layer "b" (Loft) must NOT appear in header or body.
+	for i, l := range lines {
+		if i == len(lines)-1 {
+			continue // footer may legitimately show bridge names
+		}
+		if strings.Contains(l, "Loft") {
+			t.Errorf("Loft must not appear when rendering layer A (line %d):\n%s", i, got)
+		}
+	}
+}
+
+func TestRender_TwoLayers_LayerKeyOverridesAndAddsViewingRemote(t *testing.T) {
+	a := makeRoom("a", 0, 0, 0); a.Name = "Square"
+	b := makeRoom("b", 0, 0, 1); b.Name = "Loft"
+	a.Exits[mapper.Up] = "b"
+	b.Exits[mapper.Down] = "a"
+	m := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{"a": a, "b": b}}
+	got := Render(View{PaneWidth: 36, PaneHeight: 7, Map: m, CurrentID: "a", LayerKey: "b"})
+	lines := strings.Split(got, "\n")
+	want := "Loft [Z=1] (viewing remote)"
+	if strings.TrimRight(lines[0], " ") != want {
+		t.Errorf("layer header = %q, want %q", lines[0], want)
+	}
+	// Should now show layer B's room glyph and not A's.
+	if !strings.ContainsRune(got, glyphRoom) && !strings.ContainsRune(got, glyphCurrentRoom) {
+		t.Errorf("expected at least one room glyph for remote layer:\n%s", got)
+	}
+}
+
 func TestFooter_NoBridges(t *testing.T) {
 	a := makeRoom("a", 0, 0, 0); a.Name = "A"
 	m := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{"a": a}}

@@ -13,6 +13,18 @@ var cardinalDirs = []mapper.Direction{
 	mapper.NorthEast, mapper.NorthWest, mapper.SouthEast, mapper.SouthWest,
 }
 
+// sameLayer reports whether a and b are in the same connected component.
+func sameLayer(m *mapper.Map, a, b string) bool {
+	if a == "" || b == "" || a == b {
+		return true
+	}
+	la := LayerOf(m, a)
+	if _, ok := la[b]; ok {
+		return true
+	}
+	return false
+}
+
 // LayerOf returns the set of room IDs reachable from start using only the
 // eight cardinal/diagonal exits. Up/Down/In/Out are NOT traversed. Returns
 // an empty (non-nil) map when m is nil or start is missing.

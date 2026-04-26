@@ -12,10 +12,23 @@ import (
 func layerHeaderLines(v View) []string {
 	label := "Unnamed Layer"
 	currentName := ""
-	if v.Map != nil && v.CurrentID != "" {
-		layer := LayerOf(v.Map, v.CurrentID)
-		if len(layer) > 0 {
-			label = LayerLabel(v.Map, layer, v.CurrentID)
+	if v.Map != nil {
+		anchorID := v.CurrentID
+		remote := false
+		if v.LayerKey != "" && v.LayerKey != v.CurrentID {
+			if _, ok := v.Map.Rooms[v.LayerKey]; ok && !sameLayer(v.Map, v.CurrentID, v.LayerKey) {
+				anchorID = v.LayerKey
+				remote = true
+			}
+		}
+		if anchorID != "" {
+			layer := LayerOf(v.Map, anchorID)
+			if len(layer) > 0 {
+				label = LayerLabel(v.Map, layer, anchorID)
+			}
+			if remote {
+				label += " (viewing remote)"
+			}
 		}
 		if r, ok := v.Map.Rooms[v.CurrentID]; ok {
 			currentName = r.Name
@@ -117,20 +130,28 @@ func bodyLines(v View, rows int) []string {
 		grid.setLine(0, "(no map — try /map create)")
 		return grid.toLines()
 	}
-	current, ok := v.Map.Rooms[v.CurrentID]
-	if !ok {
+	if _, ok := v.Map.Rooms[v.CurrentID]; !ok {
 		grid.setLine(0, "(current room missing from map)")
 		return grid.toLines()
 	}
 
-	// Determine layer membership.
-	layer := LayerOf(v.Map, v.CurrentID)
+	// Determine which room id anchors the layer being rendered.
+	anchorID := v.CurrentID
+	if v.LayerKey != "" && v.LayerKey != v.CurrentID {
+		if _, ok := v.Map.Rooms[v.LayerKey]; ok && !sameLayer(v.Map, v.CurrentID, v.LayerKey) {
+			anchorID = v.LayerKey
+		}
+	}
+	layer := LayerOf(v.Map, anchorID)
 	if len(layer) == 0 {
-		layer = map[string]struct{}{v.CurrentID: {}}
+		layer = map[string]struct{}{anchorID: {}}
 	}
 
-	// Anchor: render coordinates relative to the current room.
-	cx, cy := current.X, current.Y
+	// Anchor the body on the chosen layer's anchor room. When viewing remote,
+	// the current room is not in `layer`, so no current-room glyph is drawn
+	// — that is the desired behaviour.
+	anchor := v.Map.Rooms[anchorID]
+	cx, cy := anchor.X, anchor.Y
 	centerCol := (cols / 2) &^ 1 // snap to even
 	centerRow := (rows / 2) &^ 1
 
