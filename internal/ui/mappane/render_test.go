@@ -67,6 +67,60 @@ func TestRender_PaneTooShort(t *testing.T) {
 	}
 }
 
+func TestRender_NorthEastDiagonalLink(t *testing.T) {
+	a := makeRoom("a", 0, 0, 0)
+	b := makeRoom("b", 1, 1, 0)
+	a.Exits[mapper.NorthEast] = "b"
+	b.Exits[mapper.SouthWest] = "a"
+	m := &mapper.Map{
+		CurrentRoom: "a",
+		Rooms:       map[string]*mapper.Room{"a": a, "b": b},
+	}
+	got := Render(View{PaneWidth: 14, PaneHeight: 9, Map: m, CurrentID: "a"})
+	if !strings.ContainsRune(got, glyphDiagNESW) {
+		t.Errorf("expected ╱ in render output:\n%s", got)
+	}
+}
+
+func TestRender_MixedGridAllEightNeighbours(t *testing.T) {
+	// 3x3 grid centred on "c" with all eight neighbours.
+	rooms := map[string]*mapper.Room{}
+	put := func(id string, x, y int) { rooms[id] = makeRoom(id, x, y, 0) }
+	put("nw", -1, 1); put("n", 0, 1); put("ne", 1, 1)
+	put("w", -1, 0); put("c", 0, 0); put("e", 1, 0)
+	put("sw", -1, -1); put("s", 0, -1); put("se", 1, -1)
+	c := rooms["c"]
+	c.Exits = map[mapper.Direction]string{
+		mapper.North: "n", mapper.South: "s", mapper.East: "e", mapper.West: "w",
+		mapper.NorthEast: "ne", mapper.NorthWest: "nw",
+		mapper.SouthEast: "se", mapper.SouthWest: "sw",
+	}
+	for id, r := range rooms {
+		if id == "c" {
+			continue
+		}
+		// Reverse links so the layer BFS sees them.
+		for d, dest := range c.Exits {
+			if dest == id {
+				r.Exits[mapper.ReverseDirection(d)] = "c"
+			}
+		}
+	}
+	m := &mapper.Map{CurrentRoom: "c", Rooms: rooms}
+	got := Render(View{PaneWidth: 18, PaneHeight: 11, Map: m, CurrentID: "c"})
+	for _, want := range []rune{glyphHLink, glyphVLink, glyphDiagNESW, glyphDiagNWSE, glyphCurrentRoom} {
+		if !strings.ContainsRune(got, want) {
+			t.Errorf("missing rune %q in render:\n%s", want, got)
+		}
+	}
+	if strings.Count(got, string(glyphCurrentRoom)) != 1 {
+		t.Error("expected exactly one current-room glyph")
+	}
+	if strings.Count(got, string(glyphRoom)) != 8 {
+		t.Errorf("expected 8 normal rooms, got %d:\n%s", strings.Count(got, string(glyphRoom)), got)
+	}
+}
+
 func TestRender_TwoRoomsLinkedEast(t *testing.T) {
 	a := makeRoom("a", 0, 0, 0)
 	b := makeRoom("b", 1, 0, 0)
