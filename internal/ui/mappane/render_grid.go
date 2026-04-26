@@ -221,6 +221,31 @@ func bodyLines(v View, rows int) []string {
 	// Bridge overlays handled in helper for clarity.
 	drawBridgeOverlays(grid, v, layer, cx, cy, centerCol, centerRow, cols, rows)
 
+	// Clipped current-room indicator: if the current room exists in the
+	// rendered layer but its placement falls outside the body, place a '*'
+	// at the body edge nearest the room's logical direction.
+	if curr, ok := v.Map.Rooms[v.CurrentID]; ok {
+		if _, isInLayer := layer[v.CurrentID]; isInLayer {
+			col := centerCol + 2*(curr.X-cx) - v.PanOffset.Col
+			row := centerRow + 2*(cy-curr.Y) - v.PanOffset.Row
+			if col < 0 || col >= cols || row < 0 || row >= rows {
+				eCol := col
+				eRow := row
+				if eCol < 0 {
+					eCol = 0
+				} else if eCol >= cols {
+					eCol = cols - 1
+				}
+				if eRow < 0 {
+					eRow = 0
+				} else if eRow >= rows {
+					eRow = rows - 1
+				}
+				grid.set(eCol, eRow, '*')
+			}
+		}
+	}
+
 	return grid.toLines()
 }
 

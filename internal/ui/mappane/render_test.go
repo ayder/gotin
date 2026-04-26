@@ -67,6 +67,22 @@ func TestRender_PaneTooShort(t *testing.T) {
 	}
 }
 
+func TestRender_PanOffsetMovesRoomsAndClipsCurrent(t *testing.T) {
+	a := makeRoom("a", 0, 0, 0); a.Name = "A"
+	m := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{"a": a}}
+	w, h := 18, 9
+	got := Render(View{
+		PaneWidth: w, PaneHeight: h, Map: m, CurrentID: "a",
+		PanOffset: Point{Col: 100, Row: 0}, // pans far past current → clipped
+	})
+	if strings.ContainsRune(got, glyphCurrentRoom) {
+		t.Errorf("current room must be clipped at this pan offset:\n%s", got)
+	}
+	if !strings.ContainsRune(got, '*') {
+		t.Errorf("expected * indicator when current is clipped:\n%s", got)
+	}
+}
+
 func TestRender_TwoLayers_DefaultShowsCurrent(t *testing.T) {
 	a := makeRoom("a", 0, 0, 0); a.Name = "Square"
 	b := makeRoom("b", 0, 0, 1); b.Name = "Loft"
