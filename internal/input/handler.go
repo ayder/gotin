@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/ayder/gotin/internal/command"
+	"github.com/ayder/gotin/internal/mapper"
 	"github.com/ayder/gotin/internal/parser"
 )
 
@@ -14,10 +15,11 @@ import (
 // (e.g. {"MCCP2": true, "MXP": false}). Absent entries fall back to the
 // installer's defaults.
 type ConnectionAlias struct {
-	Host      string          `json:"host"`
-	Port      int             `json:"port"`
-	Auto      bool            `json:"auto"`
-	Protocols map[string]bool `json:"protocols,omitempty"`
+	Host           string                 `json:"host"`
+	Port           int                    `json:"port"`
+	Auto           bool                   `json:"auto"`
+	Protocols      map[string]bool        `json:"protocols,omitempty"`
+	MappingOptions *mapper.MappingOptions `json:"mapping_options,omitempty"`
 }
 
 // parseBraceDelimitedArgs parses brace-delimited arguments from a string.
@@ -277,12 +279,16 @@ Map
   /map dig <dir> <action>             Create a room in a direction
   /map undo                           Undo last map action
   /map delete <room>                  Delete a room
-  /map goto <room>                    Teleport to a room
+  /map teleport <room>                Teleport to a room
   /map link <dir> <room>              Link a direction to a room
   /map name <name>                    Rename current room
   /map search <query>                 Search for a room
-  /map show [scope|radius]            Show map around current room
+  /map mermaid [scope|radius]         Render Mermaid graph of nearby rooms
+  /map show                           Toggle the side-by-side map pane
   /map info                           Show current room info
+  /map option                         Show mapping strategy options
+  /map option vnum|hash on|off        Enable/disable a mapping strategy
+  /map option none                    Disable all mapping strategies
   /map start [room]                   Start auto-mapping
   /map stop                           Stop auto-mapping
   /map exit                           Save map and stop mapping
@@ -424,9 +430,10 @@ func (h *Handler) cmdConnection(args []string) ParseResult {
 			auto = true
 		}
 		h.connections[name] = ConnectionAlias{
-			Host: host,
-			Port: port,
-			Auto: auto,
+			Host:           host,
+			Port:           port,
+			Auto:           auto,
+			MappingOptions: defaultMappingOptionsPtr(),
 		}
 		autoStr := ""
 		if auto {
@@ -480,6 +487,11 @@ func (h *Handler) cmdConnection(args []string) ParseResult {
 			Response: "Unknown connection subcommand: " + subcmd + "\nSubcommands: add, remove, list",
 		}
 	}
+}
+
+func defaultMappingOptionsPtr() *mapper.MappingOptions {
+	opts := mapper.DefaultMappingOptions()
+	return &opts
 }
 
 // GetAliases returns all defined aliases for persistence.
@@ -617,7 +629,7 @@ func (h *Handler) cmdLoad(args []string) ParseResult {
 func (h *Handler) cmdMap(args []string) ParseResult {
 	if len(args) == 0 {
 		return ParseResult{
-			Response: "Usage: /map <subcommand> [args...]\nSubcommands: create, paths, dig, undo, delete, goto, link, name, search, show, info, start, stop, exit",
+			Response: "Usage: /map <subcommand> [args...]\nSubcommands: create, paths, dig, undo, delete, teleport, link, name, search, mermaid, show, info, option, start, stop, exit",
 		}
 	}
 
@@ -670,10 +682,10 @@ func (h *Handler) cmdMap(args []string) ParseResult {
 			Response: "Deleting room...",
 		}
 
-	case "goto":
-		// /map goto <room_id or room_name>
+	case "teleport":
+		// /map teleport <room_id or room_name>
 		if len(subargs) < 1 {
-			return ParseResult{Response: "Usage: /map goto <room_id or room_name>"}
+			return ParseResult{Response: "Usage: /map teleport <room_id or room_name>"}
 		}
 		return ParseResult{
 			Command:  &command.MapGoto{Query: strings.Join(subargs, " ")},
@@ -727,15 +739,45 @@ func (h *Handler) cmdMap(args []string) ParseResult {
 			Response: "Searching...",
 		}
 
-	case "show":
+	case "mermaid":
 		scope := ""
 		if len(subargs) > 0 {
 			scope = subargs[0]
 		}
-		return ParseResult{Command: &command.MapShow{Scope: scope}}
+		return ParseResult{Command: &command.MapMermaid{Scope: scope}}
+
+	case "show":
+		return ParseResult{Command: &command.MapShow{}, Response: "Toggling map pane..."}
 
 	case "info":
 		return ParseResult{Command: &command.MapInfo{}}
+
+	case "option":
+		if len(subargs) == 0 {
+			return ParseResult{Command: &command.MapOption{Print: true}}
+		}
+		strat := strings.ToLower(subargs[0])
+		switch strat {
+		case "vnum", "hash":
+			if len(subargs) != 2 {
+				return ParseResult{Response: "Usage: /map option " + strat + " on|off"}
+			}
+			switch strings.ToLower(subargs[1]) {
+			case "on":
+				return ParseResult{Command: &command.MapOption{Strategy: strat, Enable: true}}
+			case "off":
+				return ParseResult{Command: &command.MapOption{Strategy: strat, Enable: false}}
+			default:
+				return ParseResult{Response: "Usage: /map option " + strat + " on|off"}
+			}
+		case "none":
+			if len(subargs) != 1 {
+				return ParseResult{Response: "Usage: /map option none"}
+			}
+			return ParseResult{Command: &command.MapOption{Strategy: "none"}}
+		default:
+			return ParseResult{Response: "Usage: /map option [vnum|hash] [on|off] | /map option none | /map option"}
+		}
 
 	case "exit":
 		return ParseResult{Command: &command.MapExit{}}
