@@ -62,7 +62,7 @@ Gotin uses local commands prefixed with `/` to manage the client. All other inpu
 | `/trigger add <p> <r>` | Add a trigger (Regex). | `/trigger add ^Hi say Hello` |
 | `/trigger remove <p>` | Remove a trigger. | `/trigger remove ^Hi` |
 | `/trigger list` | List all triggers. | `/trigger list` |
-| `/map <subcmd>` | Mapper commands (see below). | `/map show` |
+| `/map <subcmd>` | Mapper commands (see below). | `/map mermaid` |
 | `/help` | Show available commands. | `/help` |
 
 ## Configuration
@@ -93,7 +93,7 @@ Gotin features a built-in mapping system to track your exploration.
 | `/map dig <dir> <action>` | Create a new room in the given direction |
 | `/map name <room_name>` | Set the current room's name |
 | `/map link <dir> <room>` | Create a one-way exit to another room (by ID or name) |
-| `/map goto <room>` | Teleport to a room by ID or name |
+| `/map teleport <room>` | Teleport to a room by ID or name |
 | `/map delete <room>` | Delete a room by ID or name |
 | `/map undo` | Undo last mapping action |
 
@@ -116,7 +116,8 @@ When a matching hash is found, the mapper links to the existing room instead of 
 #### Search & Info
 | Command | Description |
 | :--- | :--- |
-| `/map show` | Display ASCII map of the immediate area |
+| `/map mermaid [radius\|all]` | Render Mermaid graph of nearby rooms |
+| `/map show` | Toggle a side-by-side terminal map pane on the right of the MUD output |
 | `/map info` | Show current room details (ID, name, exits, coordinates) |
 | `/map search <query>` | Find rooms by name or description |
 
@@ -132,7 +133,7 @@ When a matching hash is found, the mapper links to the existing room instead of 
 /map start                   # Enable auto-mapping
 n                            # Move north (auto-creates room)
 /map name "Market Street"    # Name the new room
-/map show                    # View ASCII map
+/map mermaid                 # Render Mermaid graph of nearby rooms
 /map stop                    # Disable auto-mapping
 /map exit                    # Save and exit
 ```

@@ -34,7 +34,7 @@ When you run `/map exit` or the game triggers an auto-save, the engine serialize
 
 ## 3. How Mermaid Graphs Are Generated
 
-When you invoke the `/map show` command, the mapping engine translates the internal graph of rooms into a **Mermaid Flowchart** (`flowchart TB`).
+When you invoke the `/map mermaid` command, the mapping engine translates the internal graph of rooms into a **Mermaid Flowchart** (`flowchart TB`).
 
 1. **Breadth-First Search (BFS)**: Starting from your `CurrentRoom`, the engine branches out via known exits up to a specified `radius` (default is 3). If you specify `all`, it skips the BFS and grabs every room in the dictionary.
 2. **Node Creation**: For every room found in the search radius, a Mermaid `Node` is created. The node label is set to the room's `Name`.
@@ -74,9 +74,9 @@ If you prefer building the map node-by-node, or need to fix auto-mapping errors:
   Creates a one-way exit from your current room to an existing room. Useful for setting up teleports or one-way drops.
   *Example: `/map link d The Sewers`*
 
-- `/map goto <room_id_or_name>`
+- `/map teleport <room_id_or_name>`
   Teleports your internal map focus to another room without actually sending movement commands to the MUD.
-  *Example: `/map goto Town Square`*
+  *Example: `/map teleport Town Square`*
 
 - `/map delete <room_id_or_name>`
   Deletes a room from the graph and automatically severs any links pointing to it.
@@ -87,11 +87,17 @@ If you prefer building the map node-by-node, or need to fix auto-mapping errors:
 
 ### Visualizing the Map
 
-- `/map show [radius|all]`
+- `/map show`
+  Toggles the live, terminal-native map pane to the right of the MUD output.
+  Cell pitch (2,2). Layer auto-switches on up/down/in/out. Pan with h/j/k/l
+  while the input line is empty; `c` recenters; `[`/`]` step layers; `Esc`
+  closes.
+
+- `/map mermaid [radius|all]`
   Generates the Mermaid graph.
-  *Example: `/map show`* (Shows rooms up to 3 steps away)
-  *Example: `/map show 5`* (Shows rooms up to 5 steps away)
-  *Example: `/map show all`* (Renders the entire world map)
+  *Example: `/map mermaid`* (Shows rooms up to 3 steps away)
+  *Example: `/map mermaid 5`* (Shows rooms up to 5 steps away)
+  *Example: `/map mermaid all`* (Renders the entire world map)
 
 - `/map info`
   Displays raw developer data for the current room, including its unique ID, Description Hash, and raw exit mappings.
@@ -136,7 +142,7 @@ Exits: [North, South]
 
 (Client automatically detects the new room, names it, and links it south back to City Center)
 
-> /map show
+> /map mermaid
 ```
 
 This will produce the following Mermaid graph in your terminal:
