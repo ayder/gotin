@@ -27,24 +27,120 @@ func footerLine(v View) string {
 	return padRight("(no layer bridges)", v.PaneWidth)
 }
 
-// bodyLines returns rows rows of body content, padded to v.PaneWidth. The
-// first cut renders fallbacks only; cardinal/diagonal drawing is layered in
-// in subsequent tasks.
+const (
+	glyphRoom        = '■'
+	glyphCurrentRoom = '▣'
+	glyphPlaceholder = '□'
+	glyphHLink       = '─'
+	glyphVLink       = '│'
+	glyphDiagNESW    = '╱'
+	glyphDiagNWSE    = '╲'
+)
+
+// bodyLines builds the map drawing area as a slice of row strings.
 func bodyLines(v View, rows int) []string {
-	out := make([]string, rows)
-	for i := range out {
-		out[i] = padRight("", v.PaneWidth)
+	if rows <= 0 {
+		return []string{}
 	}
-	if rows == 0 {
-		return out
+	cols := v.PaneWidth
+	grid := newGrid(cols, rows)
+
+	// Fallback strings keep the previous behaviour for invalid input.
+	if v.Map == nil {
+		grid.setLine(0, "(no map — try /map create)")
+		return grid.toLines()
 	}
-	switch {
-	case v.Map == nil:
-		out[0] = padRight("(no map — try /map create)", v.PaneWidth)
-	case v.CurrentID == "":
-		out[0] = padRight("(current room missing from map)", v.PaneWidth)
-	case v.Map.Rooms[v.CurrentID] == nil:
-		out[0] = padRight("(current room missing from map)", v.PaneWidth)
+	current, ok := v.Map.Rooms[v.CurrentID]
+	if !ok {
+		grid.setLine(0, "(current room missing from map)")
+		return grid.toLines()
+	}
+
+	// Determine layer membership.
+	layer := LayerOf(v.Map, v.CurrentID)
+	if len(layer) == 0 {
+		layer = map[string]struct{}{v.CurrentID: {}}
+	}
+
+	// Anchor: render coordinates relative to the current room.
+	cx, cy := current.X, current.Y
+	centerCol := (cols / 2) &^ 1 // snap to even
+	centerRow := (rows / 2) &^ 1
+
+	// Place the rooms.
+	for id := range layer {
+		r := v.Map.Rooms[id]
+		if r == nil {
+			continue
+		}
+		col := centerCol + 2*(r.X-cx) - v.PanOffset.Col
+		row := centerRow + 2*(cy-r.Y) - v.PanOffset.Row // y inverted
+		if col < 0 || col >= cols || row < 0 || row >= rows {
+			continue
+		}
+		switch {
+		case id == v.CurrentID:
+			grid.set(col, row, glyphCurrentRoom)
+		case placeholderName(r.Name):
+			grid.set(col, row, glyphPlaceholder)
+		default:
+			grid.set(col, row, glyphRoom)
+		}
+	}
+
+	return grid.toLines()
+}
+
+// grid is a 2-D rune buffer that fills with spaces and renders to lines.
+type grid struct {
+	cells [][]rune
+	cols  int
+	rows  int
+}
+
+func newGrid(cols, rows int) *grid {
+	g := &grid{cols: cols, rows: rows, cells: make([][]rune, rows)}
+	for r := range g.cells {
+		g.cells[r] = make([]rune, cols)
+		for c := range g.cells[r] {
+			g.cells[r][c] = ' '
+		}
+	}
+	return g
+}
+
+func (g *grid) set(col, row int, r rune) {
+	if col < 0 || col >= g.cols || row < 0 || row >= g.rows {
+		return
+	}
+	g.cells[row][col] = r
+}
+
+func (g *grid) get(col, row int) rune {
+	if col < 0 || col >= g.cols || row < 0 || row >= g.rows {
+		return 0
+	}
+	return g.cells[row][col]
+}
+
+func (g *grid) setLine(row int, s string) {
+	if row < 0 || row >= g.rows {
+		return
+	}
+	r := []rune(s)
+	for i := 0; i < g.cols; i++ {
+		if i < len(r) {
+			g.cells[row][i] = r[i]
+		} else {
+			g.cells[row][i] = ' '
+		}
+	}
+}
+
+func (g *grid) toLines() []string {
+	out := make([]string, g.rows)
+	for r := range out {
+		out[r] = string(g.cells[r])
 	}
 	return out
 }
