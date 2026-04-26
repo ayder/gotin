@@ -57,6 +57,34 @@ func TestMapPaneToggle_OffRestoresFullViewport(t *testing.T) {
 // quiet unused-import: mapper used by later tests.
 var _ = mapper.Direction("")
 
+func TestStatusMsg_TriggersRecenterWhenCurrentRoomChanges(t *testing.T) {
+	m := freshModel(80, 24)
+	curr := "a"
+	rooms := map[string]*mapper.Room{
+		"a": {ID: "a", Name: "A", Exits: map[mapper.Direction]string{}},
+		"b": {ID: "b", Name: "B", Exits: map[mapper.Direction]string{}},
+	}
+	mm := &mapper.Map{CurrentRoom: "a", Rooms: rooms}
+	m.SetMapEngineSnapshot(func() (*mapper.Map, string) { return mm, curr })
+	tm, _ := m.Update(MapPaneToggleMsg{})
+	m = tm.(Model)
+	m.mapPanOffset = mappane.Point{Col: 6, Row: 6}
+	m.mapPaneLastCurrID = "a"
+
+	// Simulate a movement; current ID flips.
+	curr = "b"
+	mm.CurrentRoom = "b"
+	tm, _ = m.Update(StatusMsg{Message: "[Map] Moved to: B"})
+	m = tm.(Model)
+
+	if m.mapPanOffset != (mappane.Point{}) {
+		t.Errorf("expected recenter on room change, offset = %+v", m.mapPanOffset)
+	}
+	if m.mapPaneLastCurrID != "b" {
+		t.Errorf("expected lastCurrID=b, got %q", m.mapPaneLastCurrID)
+	}
+}
+
 func TestPaneKeys_EscClosesWhenEmpty(t *testing.T) {
 	m := freshModel(80, 24)
 	tm, _ := m.Update(MapPaneToggleMsg{})

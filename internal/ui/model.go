@@ -404,6 +404,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		trimmed := strings.TrimSpace(msg.Message)
 		if strings.Contains(trimmed, "\n") {
 			m.appendContent(msg.Message)
+			if strings.HasPrefix(trimmed, "[Map]") && m.mapPaneVisible && m.mapEngineSnapshot != nil {
+				_, currID := m.mapEngineSnapshot()
+				if currID != "" && currID != m.mapPaneLastCurrID {
+					m.mapPanOffset = mappane.Point{}
+					m.mapPaneLayerKey = ""
+					m.mapPaneLastCurrID = currID
+				}
+			}
 			var tickCmd tea.Cmd
 			if !m.pendingTick {
 				m.pendingTick = true
@@ -412,6 +420,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tickCmd
 		}
 		m.statusMsg = trimmed
+		if strings.HasPrefix(trimmed, "[Map]") && m.mapPaneVisible && m.mapEngineSnapshot != nil {
+			_, currID := m.mapEngineSnapshot()
+			if currID != "" && currID != m.mapPaneLastCurrID {
+				m.mapPanOffset = mappane.Point{}
+				m.mapPaneLayerKey = ""
+				m.mapPaneLastCurrID = currID
+			}
+		}
 		return m, nil
 
 	case ProtocolsMsg:
