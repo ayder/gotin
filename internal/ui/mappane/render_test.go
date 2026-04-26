@@ -67,6 +67,58 @@ func TestRender_PaneTooShort(t *testing.T) {
 	}
 }
 
+func TestRender_BridgeOverlay_CardinalWinsOverArrow(t *testing.T) {
+	a := makeRoom("a", 0, 0, 0); a.Name = "A"
+	b := makeRoom("b", 0, 1, 0); b.Name = "B"
+	c := makeRoom("c", 0, 0, 1); c.Name = "C"
+	a.Exits[mapper.North] = "b"
+	b.Exits[mapper.South] = "a"
+	a.Exits[mapper.Up] = "c"
+	c.Exits[mapper.Down] = "a"
+	m := &mapper.Map{
+		CurrentRoom: "a",
+		Rooms:       map[string]*mapper.Room{"a": a, "b": b, "c": c},
+	}
+	got := Render(View{PaneWidth: 18, PaneHeight: 9, Map: m, CurrentID: "a"})
+	lines := strings.Split(got, "\n")
+	// Find current row.
+	var curRow int
+	for i, l := range lines {
+		if strings.ContainsRune(l, glyphCurrentRoom) {
+			curRow = i
+			break
+		}
+	}
+	above := lines[curRow-1]
+	if !strings.ContainsRune(above, glyphVLink) {
+		t.Errorf("expected │ on row above current room, got %q", above)
+	}
+	if strings.ContainsRune(above, '↑') {
+		t.Errorf("↑ must NOT appear when │ already occupies the gutter, got %q", above)
+	}
+}
+
+func TestRender_BridgeOverlay_DownAndIn(t *testing.T) {
+	a := makeRoom("a", 0, 0, 0)
+	b := makeRoom("b", 0, 0, -1)
+	c := makeRoom("c", 0, 0, 0)
+	a.Exits[mapper.Down] = "b"
+	b.Exits[mapper.Up] = "a"
+	a.Exits[mapper.In] = "c"
+	c.Exits[mapper.Out] = "a"
+	m := &mapper.Map{
+		CurrentRoom: "a",
+		Rooms:       map[string]*mapper.Room{"a": a, "b": b, "c": c},
+	}
+	got := Render(View{PaneWidth: 18, PaneHeight: 9, Map: m, CurrentID: "a"})
+	if !strings.ContainsRune(got, '↓') {
+		t.Errorf("expected ↓ overlay below current room:\n%s", got)
+	}
+	if !strings.ContainsRune(got, '▶') {
+		t.Errorf("expected ▶ overlay east of current room:\n%s", got)
+	}
+}
+
 func TestRender_CoordOverlapNudgesAndFlags(t *testing.T) {
 	// a and b both live at (0,0). They share a layer because b lists a as
 	// its east neighbour even though the coordinates do not match — that

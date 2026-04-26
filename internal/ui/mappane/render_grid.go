@@ -146,7 +146,53 @@ func bodyLines(v View, rows int) []string {
 		}
 	}
 
+	// Bridge overlays handled in helper for clarity.
+	drawBridgeOverlays(grid, v, layer, cx, cy, centerCol, centerRow, cols, rows)
+
 	return grid.toLines()
+}
+
+// drawBridgeOverlays writes the up/down/in/out arrow glyphs into the
+// gutters around the current-room cell, but only when the current room is
+// part of the rendered layer (otherwise we are viewing a remote layer and
+// the player's room belongs elsewhere). A glyph is written only when its
+// gutter cell is still ' ' — cardinal/diagonal links keep precedence.
+func drawBridgeOverlays(g *grid, v View, layer map[string]struct{}, cx, cy, centerCol, centerRow, cols, rows int) {
+	if _, currInLayer := layer[v.CurrentID]; !currInLayer {
+		return
+	}
+	curr, ok := v.Map.Rooms[v.CurrentID]
+	if !ok {
+		return
+	}
+	curCol := centerCol + 2*(curr.X-cx) - v.PanOffset.Col
+	curRow := centerRow + 2*(cy-curr.Y) - v.PanOffset.Row
+	type slot struct {
+		dCol, dRow int
+		glyph      rune
+	}
+	bridges := []struct {
+		dir  mapper.Direction
+		slot slot
+	}{
+		{mapper.Up, slot{0, -1, '↑'}},
+		{mapper.Down, slot{0, +1, '↓'}},
+		{mapper.In, slot{+1, 0, '▶'}},
+		{mapper.Out, slot{-1, 0, '◀'}},
+	}
+	for _, br := range bridges {
+		if _, has := curr.Exits[br.dir]; !has {
+			continue
+		}
+		tCol := curCol + br.slot.dCol
+		tRow := curRow + br.slot.dRow
+		if tCol < 0 || tCol >= cols || tRow < 0 || tRow >= rows {
+			continue
+		}
+		if g.get(tCol, tRow) == ' ' {
+			g.set(tCol, tRow, br.slot.glyph)
+		}
+	}
 }
 
 // cardinalOffset returns the X/Y deltas a direction implies, plus an "ok"
