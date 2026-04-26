@@ -81,3 +81,41 @@ func TestLayerOf_NilMapAndUnknownStart(t *testing.T) {
 		t.Errorf("unknown start: got %v, want empty", got)
 	}
 }
+
+func TestAllLayers_DeterministicAndOnePerComponent(t *testing.T) {
+	a := makeRoom("a", 0, 0, 0)
+	b := makeRoom("b", 1, 0, 0)
+	c := makeRoom("c", 0, 0, 1) // separate Z layer
+	d := makeRoom("d", 5, 5, 0) // separate component
+	a.Exits[mapper.East] = "b"
+	b.Exits[mapper.West] = "a"
+
+	m := &mapper.Map{Rooms: map[string]*mapper.Room{"a": a, "b": b, "c": c, "d": d}}
+
+	got1 := AllLayers(m)
+	got2 := AllLayers(m)
+	if len(got1) != 3 {
+		t.Fatalf("AllLayers len = %d, want 3 (a/b component, c, d), got %v", len(got1), got1)
+	}
+	for i := range got1 {
+		if got1[i] != got2[i] {
+			t.Errorf("AllLayers not deterministic: %v vs %v", got1, got2)
+		}
+	}
+	// First-room-by-id of each component is the rep; sorted ascending.
+	want := []string{"a", "c", "d"}
+	for i, w := range want {
+		if got1[i] != w {
+			t.Errorf("AllLayers[%d] = %q, want %q", i, got1[i], w)
+		}
+	}
+}
+
+func TestAllLayers_NilAndEmpty(t *testing.T) {
+	if got := AllLayers(nil); len(got) != 0 {
+		t.Errorf("nil: got %v", got)
+	}
+	if got := AllLayers(&mapper.Map{Rooms: map[string]*mapper.Room{}}); len(got) != 0 {
+		t.Errorf("empty: got %v", got)
+	}
+}
