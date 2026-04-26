@@ -67,6 +67,22 @@ func TestRender_PaneTooShort(t *testing.T) {
 	}
 }
 
+func TestRender_OmitsEdgeWhenCoordsDoNotMatch(t *testing.T) {
+	// A says exits[E]=B, but B's X is 5 (not 1). The link must NOT be drawn.
+	a := makeRoom("a", 0, 0, 0)
+	b := makeRoom("b", 5, 0, 0)
+	a.Exits[mapper.East] = "b"
+	b.Exits[mapper.West] = "a"
+	m := &mapper.Map{
+		CurrentRoom: "a",
+		Rooms:       map[string]*mapper.Room{"a": a, "b": b},
+	}
+	got := Render(View{PaneWidth: 30, PaneHeight: 9, Map: m, CurrentID: "a"})
+	if strings.ContainsRune(got, glyphHLink) {
+		t.Errorf("expected NO ─ when destination coord does not match offset:\n%s", got)
+	}
+}
+
 func TestRender_NorthEastDiagonalLink(t *testing.T) {
 	a := makeRoom("a", 0, 0, 0)
 	b := makeRoom("b", 1, 1, 0)
