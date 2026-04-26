@@ -10,8 +10,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/google/uuid"
 	"github.com/TyphonHill/go-mermaid/diagrams/flowchart"
+	"github.com/google/uuid"
 )
 
 // Direction represents a cardinal direction.
@@ -31,6 +31,18 @@ const (
 	In        Direction = "in"
 	Out       Direction = "out"
 )
+
+// MappingOptions configures which loop-detection strategies the mapper uses
+// during auto-mapping. Strategies are independent and may be combined.
+type MappingOptions struct {
+	Vnum bool `json:"vnum"`
+	Hash bool `json:"hash"`
+}
+
+// DefaultMappingOptions returns the safe default: vnum on, hash off.
+func DefaultMappingOptions() MappingOptions {
+	return MappingOptions{Vnum: true, Hash: false}
+}
 
 // ReverseDirection returns the opposite direction.
 func ReverseDirection(dir Direction) Direction {
@@ -122,15 +134,21 @@ func DefaultPaths() []Direction {
 type Engine struct {
 	data        *Map
 	mu          sync.RWMutex
-	path        string      // Persistence path
+	path        string       // Persistence path
 	undo        []mapCommand // Undo stack
-	paths       []Direction // Configured available directions
-	autoMapping bool        // Whether auto-mapping mode is enabled
+	paths       []Direction  // Configured available directions
+	autoMapping bool         // Whether auto-mapping mode is enabled
 
 	// Smart auto-mapping state
 	hashIndex       map[string]string // Hash -> RoomID for loop detection
+	structuralIndex map[string]string // Phase 2 structural hash -> RoomID
 	pendingDir      Direction         // Direction we're moving in (for linking after room data arrives)
 	pendingFromRoom string            // Room ID we're moving from
+	pendingName     string            // One-slot latch for out-of-band room name (e.g. MXP <ROOMNAME>)
+	options         MappingOptions
+	profile         MUDProfile
+	sawMXP          bool
+	sawBlockStart   bool
 }
 
 // RoomData represents parsed room information from MUD output.
@@ -146,10 +164,13 @@ func NewEngine(path string) *Engine {
 		data: &Map{
 			Rooms: make(map[string]*Room),
 		},
-		path:      path,
-		undo:      make([]mapCommand, 0),
-		paths:     DefaultPaths(),
-		hashIndex: make(map[string]string),
+		path:            path,
+		undo:            make([]mapCommand, 0),
+		paths:           DefaultPaths(),
+		hashIndex:       make(map[string]string),
+		structuralIndex: make(map[string]string),
+		options:         DefaultMappingOptions(),
+		profile:         DefaultT2TMUDProfile(),
 	}
 }
 
@@ -165,6 +186,84 @@ func (e *Engine) GetPaths() []Direction {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.paths
+}
+
+// SetMappingOptions replaces the loop-detection options. Safe for concurrent use.
+func (e *Engine) SetMappingOptions(opts MappingOptions) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.options = opts
+}
+
+// GetMappingOptions returns the current loop-detection options.
+func (e *Engine) GetMappingOptions() MappingOptions {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.options
+}
+
+// SetMUDProfile replaces the MUD profile used by Phase 2 block parsing.
+func (e *Engine) SetMUDProfile(p MUDProfile) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.profile = p
+}
+
+// GetMUDProfile returns the current MUD profile.
+func (e *Engine) GetMUDProfile() MUDProfile {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.profile
+}
+
+// Snapshot returns a deep-copied *Map plus the current room ID. Safe for
+// rendering off-engine without holding e.mu. Returns a non-nil empty Map
+// when the engine has not yet been Created; CurrentRoom may be "".
+func (e *Engine) Snapshot() (*Map, string) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.data == nil {
+		return &Map{Rooms: make(map[string]*Room)}, ""
+	}
+	return e.data.deepCopy(), e.data.CurrentRoom
+}
+
+// MarkMXPSeen flags that at least one MXP-emitted tag has been observed on the
+// current connection.
+func (e *Engine) MarkMXPSeen() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.sawMXP = true
+}
+
+// HasMXPSeen reports whether any MXP tag has been observed yet.
+func (e *Engine) HasMXPSeen() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.sawMXP
+}
+
+// MarkBlockStartSeen flags that the configured block-start tag has been
+// observed at least once on this connection.
+func (e *Engine) MarkBlockStartSeen() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.sawBlockStart = true
+}
+
+// HasBlockStartSeen reports the current block-start sentinel state.
+func (e *Engine) HasBlockStartSeen() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.sawBlockStart
+}
+
+// ResetBlockStart clears both MXP-seen and block-start sentinels.
+func (e *Engine) ResetBlockStart() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.sawMXP = false
+	e.sawBlockStart = false
 }
 
 // IsValidDirection checks if a direction is in the configured paths.
@@ -242,6 +341,34 @@ func ComputeRoomHash(desc string, exits []string) string {
 	combined := descPart + "|" + strings.Join(sortedExits, ",")
 	hash := sha256.Sum256([]byte(combined))
 	return hex.EncodeToString(hash[:])
+}
+
+// normaliseDescription trims surrounding whitespace and collapses any run of
+// internal whitespace within a line down to a single space. Newlines are
+// preserved.
+func normaliseDescription(s string) string {
+	lines := strings.Split(s, "\n")
+	var out []string
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		out = append(out, strings.Join(fields, " "))
+	}
+	return strings.Join(out, "\n")
+}
+
+// ComputeStructuralHash builds a Phase 2 room-identity hash from a cleaned
+// description and a sorted exit set. The returned value is prefixed "v2:" so
+// it is externally distinguishable from legacy ComputeRoomHash output.
+func ComputeStructuralHash(desc string, exits []string) string {
+	norm := normaliseDescription(desc)
+	sortedExits := append([]string(nil), exits...)
+	sort.Strings(sortedExits)
+	payload := "v2|" + norm + "|" + strings.Join(sortedExits, ",")
+	h := sha256.Sum256([]byte(payload))
+	return "v2:" + hex.EncodeToString(h[:])
 }
 
 // ParseRoomData extracts room description and exits from MUD output.
@@ -327,6 +454,7 @@ func (e *Engine) Create(filename string) error {
 		Rooms: make(map[string]*Room),
 	}
 	e.hashIndex = make(map[string]string)
+	e.structuralIndex = make(map[string]string)
 	e.undo = e.undo[:0]
 
 	// Create Start Room
@@ -340,12 +468,15 @@ func (e *Engine) Create(filename string) error {
 	return nil
 }
 
-// rebuildHashIndex rebuilds the hash index from existing rooms.
+// rebuildHashIndex rebuilds both legacy and structural hash indices from
+// existing rooms.
 func (e *Engine) rebuildHashIndex() {
 	e.hashIndex = make(map[string]string)
+	e.structuralIndex = make(map[string]string)
 	for id, room := range e.data.Rooms {
 		if room.DescriptionHash != "" {
 			e.hashIndex[room.DescriptionHash] = id
+			e.structuralIndex[room.DescriptionHash] = id
 		}
 	}
 }
@@ -357,6 +488,7 @@ func (e *Engine) saveState() {
 		snapshot:        e.data.deepCopy(),
 		pendingDir:      e.pendingDir,
 		pendingFromRoom: e.pendingFromRoom,
+		pendingName:     e.pendingName,
 	})
 	if len(e.undo) > 50 {
 		e.undo = e.undo[1:]
@@ -532,7 +664,7 @@ func (e *Engine) Show(radius int) string {
 	for _, id := range sortedIDs {
 		r := visibleRooms[id]
 		fromNode := nodeMap[id]
-		
+
 		var sortedDirs []Direction
 		for dir := range r.Exits {
 			sortedDirs = append(sortedDirs, dir)
@@ -643,6 +775,15 @@ func (e *Engine) DeleteByNameOrID(query string) error {
 	return nil
 }
 
+// IsCreated reports whether a map has been initialized via Create. Used to
+// gate auto-mapping start so callers must explicitly create or load a map
+// before rooms begin accumulating.
+func (e *Engine) IsCreated() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.path != ""
+}
+
 // StartAutoMapping enables auto-mapping mode.
 func (e *Engine) StartAutoMapping() {
 	e.mu.Lock()
@@ -669,6 +810,9 @@ func (e *Engine) IsAutoMapping() bool {
 // For smart auto-mapping, this sets up pending state - call ProcessRoomData when room text arrives.
 func (e *Engine) ProcessMovement(input string) (processed bool, roomName string, err error) {
 	if !e.IsAutoMapping() {
+		return false, "", nil
+	}
+	if !e.HasMXPSeen() || !e.HasBlockStartSeen() {
 		return false, "", nil
 	}
 
@@ -710,6 +854,79 @@ func (e *Engine) ProcessMovement(input string) (processed bool, roomName string,
 	return true, "[pending room data]", nil
 }
 
+// HandleRoomBlock processes a fully-buffered room render produced by the Phase
+// 2 RoomBlockBuffer.
+func (e *Engine) HandleRoomBlock(b RoomBlock) (processed bool, roomName string, loopDetected bool, err error) {
+	if !e.IsAutoMapping() {
+		return false, "", false, nil
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if !e.sawMXP || !e.sawBlockStart {
+		return false, "", false, nil
+	}
+
+	if e.pendingDir == "" {
+		curr, ok := e.data.Rooms[e.data.CurrentRoom]
+		if ok {
+			if b.Description != "" {
+				curr.Description = b.Description
+				if e.options.Hash {
+					h := ComputeStructuralHash(b.Description, b.Exits)
+					curr.DescriptionHash = h
+					e.structuralIndex[h] = curr.ID
+				}
+			}
+			if b.Name != "" {
+				curr.Name = b.Name
+			}
+		}
+		return false, "", false, nil
+	}
+
+	fromRoom, ok := e.data.Rooms[e.pendingFromRoom]
+	if !ok {
+		e.pendingDir = ""
+		e.pendingFromRoom = ""
+		e.pendingName = ""
+		return false, "", false, fmt.Errorf("source room not found")
+	}
+
+	if e.options.Vnum && b.Vnum != "" {
+		if existing, found := e.data.Rooms[b.Vnum]; found {
+			e.saveState()
+			e.completePendingMovement(fromRoom, e.pendingDir, b.Vnum, existing)
+			return true, existing.Name, true, nil
+		}
+	}
+	if e.options.Hash && b.Description != "" {
+		h := ComputeStructuralHash(b.Description, b.Exits)
+		if existingID, found := e.structuralIndex[h]; found {
+			if existing, ok := e.data.Rooms[existingID]; ok {
+				e.saveState()
+				e.completePendingMovement(fromRoom, e.pendingDir, existingID, existing)
+				return true, existing.Name, true, nil
+			}
+		}
+	}
+
+	var newID string
+	if e.options.Vnum && b.Vnum != "" {
+		newID = b.Vnum
+	} else {
+		newID = uuid.New().String()
+	}
+	e.saveState()
+	var descHash string
+	if e.options.Hash {
+		descHash = ComputeStructuralHash(b.Description, b.Exits)
+	}
+	newRoom := e.createRoomV2(fromRoom, e.pendingDir, newID, b.Name, b.Description, descHash)
+	return true, newRoom.Name, false, nil
+}
+
 // completePendingMovement links fromRoom to an existing room in the given direction,
 // adds the reverse link if missing, sets current room, and clears pending state.
 // The caller must have already called saveState() and must hold e.mu.
@@ -724,6 +941,7 @@ func (e *Engine) completePendingMovement(fromRoom *Room, dir Direction, existing
 	e.data.CurrentRoom = existingID
 	e.pendingDir = ""
 	e.pendingFromRoom = ""
+	e.pendingName = ""
 }
 
 // createRoom creates a new room at the coordinates offset from fromRoom in the
@@ -758,9 +976,17 @@ func (e *Engine) createRoom(fromRoom *Room, dir Direction, id, name, description
 		nz--
 	}
 
+	effectiveName := name
+	if effectiveName == "" || effectiveName == "New Room" {
+		if e.pendingName != "" {
+			effectiveName = e.pendingName
+		}
+	}
+	e.pendingName = ""
+
 	room := &Room{
 		ID:              id,
-		Name:            name,
+		Name:            effectiveName,
 		Description:     description,
 		DescriptionHash: descHash,
 		Exits:           make(map[Direction]string),
@@ -776,7 +1002,77 @@ func (e *Engine) createRoom(fromRoom *Room, dir Direction, id, name, description
 	}
 
 	e.data.Rooms[id] = room
-	e.hashIndex[descHash] = id
+	if e.options.Hash && descHash != "" {
+		e.hashIndex[descHash] = id
+	}
+	e.data.CurrentRoom = id
+
+	e.pendingDir = ""
+	e.pendingFromRoom = ""
+
+	return room
+}
+
+// createRoomV2 mirrors createRoom but writes into structuralIndex instead of
+// the legacy hashIndex. Caller must hold e.mu.
+func (e *Engine) createRoomV2(fromRoom *Room, dir Direction, id, name, description, descHash string) *Room {
+	nx, ny, nz := fromRoom.X, fromRoom.Y, fromRoom.Z
+	switch dir {
+	case North:
+		ny++
+	case South:
+		ny--
+	case East:
+		nx++
+	case West:
+		nx--
+	case NorthEast:
+		nx++
+		ny++
+	case SouthWest:
+		nx--
+		ny--
+	case NorthWest:
+		nx--
+		ny++
+	case SouthEast:
+		nx++
+		ny--
+	case Up:
+		nz++
+	case Down:
+		nz--
+	}
+
+	effectiveName := name
+	if effectiveName == "" || effectiveName == "New Room" {
+		if e.pendingName != "" {
+			effectiveName = e.pendingName
+		}
+	}
+	e.pendingName = ""
+
+	room := &Room{
+		ID:              id,
+		Name:            effectiveName,
+		Description:     description,
+		DescriptionHash: descHash,
+		Exits:           make(map[Direction]string),
+		X:               nx,
+		Y:               ny,
+		Z:               nz,
+	}
+
+	fromRoom.Exits[dir] = id
+	reverse := ReverseDirection(dir)
+	if reverse != "" {
+		room.Exits[reverse] = fromRoom.ID
+	}
+
+	e.data.Rooms[id] = room
+	if e.options.Hash && descHash != "" {
+		e.structuralIndex[descHash] = id
+	}
 	e.data.CurrentRoom = id
 
 	e.pendingDir = ""
@@ -796,44 +1092,48 @@ func (e *Engine) ProcessRoomData(text string) (processed bool, roomName string, 
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// No pending movement to complete
 	if e.pendingDir == "" {
-		// Still update current room's description if we have one
 		if curr, ok := e.data.Rooms[e.data.CurrentRoom]; ok {
 			roomData := ParseRoomData(text)
 			if roomData.Description != "" {
 				curr.Description = roomData.RawText
-				hash := ComputeRoomHash(roomData.Description, roomData.Exits)
-				curr.DescriptionHash = hash
-				e.hashIndex[hash] = curr.ID
+				if e.options.Hash {
+					hash := ComputeRoomHash(roomData.Description, roomData.Exits)
+					curr.DescriptionHash = hash
+					e.hashIndex[hash] = curr.ID
+				}
 			}
 		}
 		return false, "", false, nil
 	}
 
-	// Parse the room data
 	roomData := ParseRoomData(text)
-	hash := ComputeRoomHash(roomData.Description, roomData.Exits)
 
 	fromRoom, ok := e.data.Rooms[e.pendingFromRoom]
 	if !ok {
 		e.pendingDir = ""
 		e.pendingFromRoom = ""
+		e.pendingName = ""
 		return false, "", false, fmt.Errorf("source room not found")
 	}
 
-	// Check if we've seen this room before (loop detection)
-	if existingID, found := e.hashIndex[hash]; found {
-		if existingRoom, ok := e.data.Rooms[existingID]; ok {
-			e.saveState()
-			e.completePendingMovement(fromRoom, e.pendingDir, existingID, existingRoom)
-			return true, existingRoom.Name, true, nil
+	if e.options.Hash {
+		hash := ComputeRoomHash(roomData.Description, roomData.Exits)
+		if existingID, found := e.hashIndex[hash]; found {
+			if existingRoom, ok := e.data.Rooms[existingID]; ok {
+				e.saveState()
+				e.completePendingMovement(fromRoom, e.pendingDir, existingID, existingRoom)
+				return true, existingRoom.Name, true, nil
+			}
 		}
 	}
 
-	// New room - create it
 	e.saveState()
-	newRoom := e.createRoom(fromRoom, e.pendingDir, uuid.New().String(), "New Room", roomData.RawText, hash)
+	var descHash string
+	if e.options.Hash {
+		descHash = ComputeRoomHash(roomData.Description, roomData.Exits)
+	}
+	newRoom := e.createRoom(fromRoom, e.pendingDir, uuid.New().String(), "New Room", roomData.RawText, descHash)
 	return true, newRoom.Name, false, nil
 }
 
@@ -874,8 +1174,10 @@ func (e *Engine) HandleGMCPRoomInfo(r GMCPRoom) (processed bool, roomName string
 		if curr, ok := e.data.Rooms[e.data.CurrentRoom]; ok {
 			if r.Description != "" {
 				curr.Description = r.Description
-				curr.DescriptionHash = ComputeRoomHash(r.Description, exits)
-				e.hashIndex[curr.DescriptionHash] = curr.ID
+				if e.options.Hash {
+					curr.DescriptionHash = ComputeRoomHash(r.Description, exits)
+					e.hashIndex[curr.DescriptionHash] = curr.ID
+				}
 			}
 			if r.Name != "" {
 				curr.Name = r.Name
@@ -888,31 +1190,59 @@ func (e *Engine) HandleGMCPRoomInfo(r GMCPRoom) (processed bool, roomName string
 	if !ok {
 		e.pendingDir = ""
 		e.pendingFromRoom = ""
+		e.pendingName = ""
 		return false, "", false, fmt.Errorf("source room not found")
 	}
 
-	// Determine room identifier: vnum is best, otherwise hash.
-	var roomID string
-	useVnum := r.Vnum != ""
-	if useVnum {
-		roomID = r.Vnum
-	} else {
+	if e.options.Vnum && r.Vnum != "" {
+		if existingRoom, found := e.data.Rooms[r.Vnum]; found {
+			e.saveState()
+			e.completePendingMovement(fromRoom, e.pendingDir, r.Vnum, existingRoom)
+			return true, existingRoom.Name, true, nil
+		}
+	}
+	if e.options.Hash && r.Description != "" {
 		hash := ComputeRoomHash(r.Description, exits)
-		roomID = hash
+		if existingID, found := e.hashIndex[hash]; found {
+			if existingRoom, ok := e.data.Rooms[existingID]; ok {
+				e.saveState()
+				e.completePendingMovement(fromRoom, e.pendingDir, existingID, existingRoom)
+				return true, existingRoom.Name, true, nil
+			}
+		}
 	}
 
-	// Loop detection
-	if existingRoom, found := e.data.Rooms[roomID]; found {
-		e.saveState()
-		e.completePendingMovement(fromRoom, e.pendingDir, roomID, existingRoom)
-		return true, existingRoom.Name, true, nil
+	var newID string
+	if e.options.Vnum && r.Vnum != "" {
+		newID = r.Vnum
+	} else {
+		newID = uuid.New().String()
 	}
-
-	// New room
 	e.saveState()
-	descHash := ComputeRoomHash(r.Description, exits)
-	newRoom := e.createRoom(fromRoom, e.pendingDir, roomID, r.Name, r.Description, descHash)
+	var descHash string
+	if e.options.Hash {
+		descHash = ComputeRoomHash(r.Description, exits)
+	}
+	newRoom := e.createRoom(fromRoom, e.pendingDir, newID, r.Name, r.Description, descHash)
 	return true, newRoom.Name, false, nil
+}
+
+// SetIncomingRoomName attaches a name supplied out-of-band to the room that
+// the next room-data handler will create. If no movement is pending, it renames
+// the current room immediately. Repeated calls before consumption: last wins.
+func (e *Engine) SetIncomingRoomName(name string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if name == "" {
+		return
+	}
+	if e.pendingDir != "" {
+		e.pendingName = name
+		return
+	}
+	if curr, ok := e.data.Rooms[e.data.CurrentRoom]; ok {
+		curr.Name = name
+	}
 }
 
 // HasPendingMovement returns true if there's a pending movement waiting for room data.
@@ -928,6 +1258,7 @@ func (e *Engine) CancelPendingMovement() {
 	defer e.mu.Unlock()
 	e.pendingDir = ""
 	e.pendingFromRoom = ""
+	e.pendingName = ""
 }
 
 // Move moves to an adjacent room in the specified direction (without creating new rooms).
