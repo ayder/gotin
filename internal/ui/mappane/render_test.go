@@ -67,6 +67,51 @@ func TestRender_PaneTooShort(t *testing.T) {
 	}
 }
 
+func TestRender_TwoRoomsLinkedEast(t *testing.T) {
+	a := makeRoom("a", 0, 0, 0)
+	b := makeRoom("b", 1, 0, 0)
+	a.Name, b.Name = "A", "B"
+	a.Exits[mapper.East] = "b"
+	b.Exits[mapper.West] = "a"
+	m := &mapper.Map{
+		CurrentRoom: "a",
+		Rooms:       map[string]*mapper.Room{"a": a, "b": b},
+	}
+	got := Render(View{PaneWidth: 14, PaneHeight: 7, Map: m, CurrentID: "a"})
+	if !strings.Contains(got, "▣─■") {
+		t.Errorf("expected ▣─■ in body, got:\n%s", got)
+	}
+}
+
+func TestRender_TwoRoomsLinkedNorth(t *testing.T) {
+	a := makeRoom("a", 0, 0, 0)
+	b := makeRoom("b", 0, 1, 0)
+	a.Exits[mapper.North] = "b"
+	b.Exits[mapper.South] = "a"
+	m := &mapper.Map{
+		CurrentRoom: "a",
+		Rooms:       map[string]*mapper.Room{"a": a, "b": b},
+	}
+	got := Render(View{PaneWidth: 14, PaneHeight: 9, Map: m, CurrentID: "a"})
+	// Vertical link is in the row above the current room glyph.
+	lines := strings.Split(got, "\n")
+	bodyStart := 2
+	// Find current room row to make assertion robust to centering math.
+	var curRow int
+	for i := bodyStart; i < len(lines); i++ {
+		if strings.ContainsRune(lines[i], glyphCurrentRoom) {
+			curRow = i
+			break
+		}
+	}
+	if curRow == 0 || curRow-1 < bodyStart {
+		t.Fatalf("could not locate current-room row in:\n%s", got)
+	}
+	if !strings.ContainsRune(lines[curRow-1], glyphVLink) {
+		t.Errorf("expected │ on row above current room, got %q", lines[curRow-1])
+	}
+}
+
 func TestRender_SingleRoomCentered(t *testing.T) {
 	a := makeRoom("a", 0, 0, 0)
 	a.Name = "Town Square"

@@ -1,5 +1,7 @@
 package mappane
 
+import "github.com/ayder/gotin/internal/mapper"
+
 // layerHeaderLines returns the two header rows: layer label + current room
 // name. Both are padded to PaneWidth.
 func layerHeaderLines(v View) []string {
@@ -88,7 +90,83 @@ func bodyLines(v View, rows int) []string {
 		}
 	}
 
+	// Draw links — one pass per direction. To avoid double-drawing, only
+	// emit a link when the source ID is alphabetically smaller than the
+	// destination ID. Connectivity rule: the destination must be in the
+	// layer AND its X/Y must match the expected offset.
+	for id := range layer {
+		r := v.Map.Rooms[id]
+		if r == nil {
+			continue
+		}
+		for d, otherID := range r.Exits {
+			if id >= otherID {
+				continue
+			}
+			other, ok := v.Map.Rooms[otherID]
+			if !ok {
+				continue
+			}
+			if _, inLayer := layer[otherID]; !inLayer {
+				continue
+			}
+			dx, dy, ok := cardinalOffset(d)
+			if !ok {
+				continue
+			}
+			if other.X != r.X+dx || other.Y != r.Y+dy {
+				continue
+			}
+			drawLink(grid, r.X-cx, cy-r.Y, dx, -dy, centerCol, centerRow, v.PanOffset)
+		}
+	}
+
 	return grid.toLines()
+}
+
+// cardinalOffset returns the X/Y deltas a direction implies, plus an "ok"
+// flag for the eight in-layer directions. Up/Down/In/Out return false.
+func cardinalOffset(d mapper.Direction) (int, int, bool) {
+	switch d {
+	case mapper.North:
+		return 0, 1, true
+	case mapper.South:
+		return 0, -1, true
+	case mapper.East:
+		return 1, 0, true
+	case mapper.West:
+		return -1, 0, true
+	case mapper.NorthEast:
+		return 1, 1, true
+	case mapper.NorthWest:
+		return -1, 1, true
+	case mapper.SouthEast:
+		return 1, -1, true
+	case mapper.SouthWest:
+		return -1, -1, true
+	}
+	return 0, 0, false
+}
+
+// drawLink writes the gutter glyph between (relX, relY) and (relX+dx, relY+dy)
+// in coord-space. screenDX/screenDY are the pre-flipped screen-space offsets
+// (Y inverted). The gutter glyph sits at the half-step.
+func drawLink(g *grid, relX, relY, dx, screenDY int, centerCol, centerRow int, pan Point) {
+	// Source screen position.
+	sCol := centerCol + 2*relX - pan.Col
+	sRow := centerRow + 2*relY - pan.Row
+	gCol := sCol + dx
+	gRow := sRow + screenDY
+	switch {
+	case dx != 0 && screenDY == 0:
+		g.set(gCol, gRow, glyphHLink)
+	case dx == 0 && screenDY != 0:
+		g.set(gCol, gRow, glyphVLink)
+	case dx > 0 && screenDY < 0, dx < 0 && screenDY > 0:
+		g.set(gCol, gRow, glyphDiagNESW) // ╱
+	case dx > 0 && screenDY > 0, dx < 0 && screenDY < 0:
+		g.set(gCol, gRow, glyphDiagNWSE) // ╲
+	}
 }
 
 // grid is a 2-D rune buffer that fills with spaces and renders to lines.
