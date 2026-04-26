@@ -25,6 +25,7 @@ import (
 	"github.com/ayder/gotin/internal/mudproto/gmcp"
 	"github.com/ayder/gotin/internal/mudproto/mccp2"
 	"github.com/ayder/gotin/internal/mudproto/mxp"
+	"github.com/ayder/gotin/internal/mudproto/protolog"
 	"github.com/ayder/gotin/internal/network"
 	"github.com/ayder/gotin/internal/ui"
 
@@ -40,9 +41,11 @@ type Options struct {
 
 // gotinData represents the JSON structure used by /save and /load commands.
 type gotinData struct {
-	Aliases     map[string]string                `json:"aliases,omitempty"`
-	Triggers    []config.TriggerConfig           `json:"triggers,omitempty"`
-	Connections map[string]input.ConnectionAlias `json:"connections,omitempty"`
+	Aliases        map[string]string                `json:"aliases,omitempty"`
+	Triggers       []config.TriggerConfig           `json:"triggers,omitempty"`
+	Connections    map[string]input.ConnectionAlias `json:"connections,omitempty"`
+	MappingOptions *mapper.MappingOptions           `json:"mapping_options,omitempty"`
+	MUDProfiles    map[string]mapper.MUDProfile     `json:"mud_profiles,omitempty"`
 }
 
 // protoFactories is the canonical name → factory map.
@@ -52,7 +55,13 @@ var protoFactories = map[string]func() network.Protocol{
 	"MXP":   func() network.Protocol { return mxp.New() },
 }
 
-func defaultOn(name string) bool { return name == "GMCP" }
+func defaultOn(name string) bool {
+	switch name {
+	case "GMCP", "MXP":
+		return true
+	}
+	return false
+}
 
 func installProtocols(c *network.Client, cfg map[string]bool) {
 	for name, factory := range protoFactories {
@@ -195,6 +204,20 @@ func Run(ctx context.Context, opts Options) error {
 	// 8. Shared logic components
 	s.te = logic.NewTriggerEngine(s.sendToNet)
 	s.mapEngine = mapper.NewEngine("")
+	s.model.SetMapEngineSnapshot(func() (*mapper.Map, string) {
+		return s.mapEngine.Snapshot()
+	})
+	defaultMappingOptions := mapper.DefaultMappingOptions()
+	s.mappingOptionsTop = &defaultMappingOptions
+
+	if opts.Debug {
+		if f, err := os.OpenFile("gotin.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+			defer f.Close()
+			s.protoLog = protolog.NewJSONLinesLogger(f, func() bool { return s.opts.Debug })
+		} else {
+			log.Printf("protolog: open gotin.log: %v", err)
+		}
+	}
 
 	// Load triggers from config
 	for _, t := range cfg.Triggers {
@@ -282,6 +305,8 @@ type Session struct {
 
 	te        *logic.TriggerEngine
 	mapEngine *mapper.Engine
+	protoLog  *protolog.JSONLinesLogger
+	roomBuf   *mapper.RoomBlockBuffer
 
 	sendChan  chan string
 	localChan chan command.Command
@@ -290,6 +315,11 @@ type Session struct {
 
 	autoConnectFromAlias bool
 	autoConnectAlias     input.ConnectionAlias
+
+	mappingOptionsScope string
+	mappingOptionsAlias string
+	mappingOptionsTop   *mapper.MappingOptions
+	mudProfiles         map[string]mapper.MUDProfile
 
 	currentHost string
 	currentPort int
@@ -379,19 +409,25 @@ func (s *Session) connect(h string, port int) {
 	})
 	installProtocols(c, s.autoConnectAlias.Protocols)
 
+	resolved, scope, aliasName := s.resolveMappingOptions(h, port)
+	s.mappingOptionsScope = scope
+	s.mappingOptionsAlias = aliasName
+	s.mapEngine.SetMappingOptions(resolved)
+
+	profile := s.resolveMUDProfile(h)
+	s.mapEngine.SetMUDProfile(profile)
+	s.mapEngine.ResetBlockStart()
+	s.roomBuf = nil
+
+	s.installProtocolLogger(c)
+
 	if g := findGMCP(c); g != nil {
 		g.SetCallback(func(pkg string, payload []byte) {
 			s.onGMCPRoomInfo(pkg, payload)
 		})
 	}
 
-	if m := findMXP(c); m != nil {
-		m.SetRoomNameCallback(func(name string) {
-			if name != "" {
-				s.trySendUI(ui.RoomNameMsg{Name: name})
-			}
-		})
-	}
+	s.configureMXP(c)
 
 	if old := s.client.Swap(c); old != nil {
 		old.SetDisconnectCallback(nil)
@@ -459,28 +495,6 @@ func (s *Session) onData(c *network.Client, lb *logic.LineBuffer, proc *logic.Pr
 	for _, line := range logicLines {
 		proc.ProcessLine(line)
 	}
-
-	gmcpActive := false
-	if cl := s.client.Load(); cl != nil {
-		for _, name := range cl.ActiveProtocols() {
-			if name == "GMCP" {
-				gmcpActive = true
-				break
-			}
-		}
-	}
-	if s.mapEngine.HasPendingMovement() && !gmcpActive {
-		processed, roomName, loopDetected, err := s.mapEngine.ProcessRoomData(data)
-		if processed {
-			if err != nil {
-				s.trySendUI(ui.StatusMsg{Message: fmt.Sprintf("[Map] Error: %v\n", err)})
-			} else if loopDetected {
-				s.trySendUI(ui.StatusMsg{Message: fmt.Sprintf("[Map] Loop detected! Linked to existing room: %s\n", roomName)})
-			} else {
-				s.trySendUI(ui.StatusMsg{Message: fmt.Sprintf("[Map] New room created: %s\n", roomName)})
-			}
-		}
-	}
 }
 
 func (s *Session) onDisconnect(reason error) {
@@ -496,6 +510,10 @@ func (s *Session) onDisconnect(reason error) {
 	s.trySendUI(ui.StatusMsg{Message: msg})
 	s.trySendUI(ui.ProtocolsMsg{Active: nil})
 	s.trySendUI(ui.RoomNameMsg{})
+	s.mapEngine.ResetBlockStart()
+	if s.roomBuf != nil {
+		s.roomBuf.Reset()
+	}
 	s.currentHost = ""
 	s.currentPort = 0
 	s.pendingHost = ""
@@ -510,25 +528,41 @@ func (s *Session) onGMCPRoomInfo(pkg string, payload []byte) {
 	if err != nil {
 		return
 	}
+	if s.protoLog != nil && s.protoLog.Enabled() {
+		s.protoLog.Log(protolog.Entry{
+			Source: "gmcp",
+			Dir:    "rx",
+			Event:  "room_info",
+			UTF8:   protolog.EncodeUTF8(payload),
+			Hex:    protolog.EncodeHex(payload),
+			Parsed: map[string]any{
+				"vnum":     room.Vnum,
+				"name":     room.Name,
+				"area":     room.Area,
+				"exits":    room.Exits,
+				"desc_len": len(room.Description),
+			},
+		})
+	}
 	if room.Name != "" {
 		s.trySendUI(ui.RoomNameMsg{Name: room.Name})
 	}
+}
 
-	processed, roomName, loopDetected, err := s.mapEngine.HandleGMCPRoomInfo(mapper.GMCPRoom{
-		Vnum:        room.Vnum,
-		Name:        room.Name,
-		Description: room.Description,
-		Area:        room.Area,
-		Exits:       room.Exits,
-	})
-	if processed {
-		if err != nil {
-			s.trySendUI(ui.StatusMsg{Message: fmt.Sprintf("[Map] GMCP Error: %v\n", err)})
-		} else if loopDetected {
-			s.trySendUI(ui.StatusMsg{Message: fmt.Sprintf("[Map] Loop detected! Linked to existing room: %s\n", roomName)})
-		} else {
-			s.trySendUI(ui.StatusMsg{Message: fmt.Sprintf("[Map] New room created: %s\n", roomName)})
-		}
+func (s *Session) onRoomBlock(b mapper.RoomBlock) {
+	if b.Name != "" {
+		s.trySendUI(ui.RoomNameMsg{Name: b.Name})
+	}
+	processed, roomName, loopDetected, err := s.mapEngine.HandleRoomBlock(b)
+	if !processed {
+		return
+	}
+	if err != nil {
+		s.trySendUI(ui.StatusMsg{Message: fmt.Sprintf("[Map] Error: %v\n", err)})
+	} else if loopDetected {
+		s.trySendUI(ui.StatusMsg{Message: fmt.Sprintf("[Map] Loop detected! Linked to existing room: %s\n", roomName)})
+	} else {
+		s.trySendUI(ui.StatusMsg{Message: fmt.Sprintf("[Map] New room created: %s\n", roomName)})
 	}
 }
 
@@ -673,6 +707,10 @@ func (s *Session) dispatch(cmd command.Command) (mutates, quit bool) {
 		if err := cl.Install(factory()); err != nil {
 			s.program.Send(ui.StatusMsg{Message: fmt.Sprintf("%s install failed: %v\n", c.Name, err)})
 		} else {
+			s.installProtocolLogger(cl)
+			if strings.EqualFold(c.Name, "MXP") {
+				s.configureMXP(cl)
+			}
 			s.program.Send(ui.StatusMsg{Message: fmt.Sprintf("[proto] %s enabled\n", c.Name)})
 		}
 
@@ -799,17 +837,25 @@ func (s *Session) dispatch(cmd command.Command) (mutates, quit bool) {
 		}
 
 	case *command.MapStart:
+		if !s.mapEngine.IsCreated() {
+			s.program.Send(ui.StatusMsg{Message: "[Map] No map loaded. Run `/map create <filename>` first to create or load one before /map start.\n"})
+			return false, false
+		}
 		if c.Query != "" {
 			if err := s.mapEngine.Goto(c.Query); err != nil {
 				s.program.Send(ui.StatusMsg{Message: fmt.Sprintf("Goto Error: %v\n", err)})
 			}
 		}
 		s.mapEngine.StartAutoMapping()
-		r := s.mapEngine.GetCurrent()
-		if r != nil {
-			s.program.Send(ui.StatusMsg{Message: fmt.Sprintf("Auto-mapping started at: %s\n", r.Name)})
+		if !s.mapEngine.HasMXPSeen() {
+			s.program.Send(ui.StatusMsg{Message: "[Map] Auto-mapping enabled, but MXP is not active on this connection. /map dig still works manually; auto-rooms will not appear until you reconnect with MXP enabled.\n"})
 		} else {
-			s.program.Send(ui.StatusMsg{Message: "Auto-mapping started.\n"})
+			r := s.mapEngine.GetCurrent()
+			if r != nil {
+				s.program.Send(ui.StatusMsg{Message: fmt.Sprintf("Auto-mapping started at: %s\n", r.Name)})
+			} else {
+				s.program.Send(ui.StatusMsg{Message: "Auto-mapping started.\n"})
+			}
 		}
 
 	case *command.MapStop:
@@ -829,7 +875,7 @@ func (s *Session) dispatch(cmd command.Command) (mutates, quit bool) {
 		}
 		return false, false
 
-	case *command.MapShow:
+	case *command.MapMermaid:
 		radius := 3
 		if c.Scope == "all" {
 			radius = -1
@@ -839,6 +885,10 @@ func (s *Session) dispatch(cmd command.Command) (mutates, quit bool) {
 			}
 		}
 		s.program.Send(ui.StatusMsg{Message: s.mapEngine.Show(radius) + "\n"})
+		return false, false
+
+	case *command.MapShow:
+		s.program.Send(ui.MapPaneToggleMsg{})
 		return false, false
 
 	case *command.MapInfo:
@@ -859,6 +909,29 @@ func (s *Session) dispatch(cmd command.Command) (mutates, quit bool) {
 			s.program.Send(ui.StatusMsg{Message: "Map saved. Auto-mapping stopped.\n"})
 		}
 
+	case *command.MapOption:
+		opts := s.mapEngine.GetMappingOptions()
+		if c.Print {
+			s.program.Send(ui.StatusMsg{Message: fmt.Sprintf("mapping options: vnum=%s, hash=%s\n", onOff(opts.Vnum), onOff(opts.Hash))})
+			return false, false
+		}
+		switch c.Strategy {
+		case "vnum":
+			opts.Vnum = c.Enable
+		case "hash":
+			opts.Hash = c.Enable
+		case "none":
+			opts.Vnum = false
+			opts.Hash = false
+		default:
+			s.program.Send(ui.StatusMsg{Message: fmt.Sprintf("Unknown mapping strategy: %s\n", c.Strategy)})
+			return false, false
+		}
+		s.mapEngine.SetMappingOptions(opts)
+		s.scheduleMapOptionsSave(opts)
+		s.program.Send(ui.StatusMsg{Message: fmt.Sprintf("mapping options: vnum=%s, hash=%s\n", onOff(opts.Vnum), onOff(opts.Hash))})
+		return false, false
+
 	case *command.AliasAdd, *command.AliasRemove,
 		*command.ConnectionAliasAdd, *command.ConnectionAliasRemove:
 		// Handler already mutated state; just schedule save
@@ -876,9 +949,11 @@ func (s *Session) saveGotinData(filename string) {
 	connections := s.model.GetConnections()
 
 	td := gotinData{
-		Aliases:     aliases,
-		Triggers:    make([]config.TriggerConfig, len(triggers)),
-		Connections: connections,
+		Aliases:        aliases,
+		Triggers:       make([]config.TriggerConfig, len(triggers)),
+		Connections:    connections,
+		MappingOptions: s.mappingOptionsTop,
+		MUDProfiles:    s.mudProfiles,
 	}
 	for i, t := range triggers {
 		td.Triggers[i] = config.TriggerConfig{
@@ -931,6 +1006,15 @@ func (s *Session) loadGotinDataFile(filename string) {
 	if td.Connections != nil {
 		s.model.SetConnections(td.Connections)
 	}
+	if td.MappingOptions != nil {
+		s.mappingOptionsTop = td.MappingOptions
+	} else {
+		defaultMappingOptions := mapper.DefaultMappingOptions()
+		s.mappingOptionsTop = &defaultMappingOptions
+	}
+	if td.MUDProfiles != nil {
+		s.mudProfiles = td.MUDProfiles
+	}
 	s.program.Send(ui.StatusMsg{Message: fmt.Sprintf("Loaded %d aliases, %d triggers and %d connections from %s\n", len(td.Aliases), len(td.Triggers), len(td.Connections), filename)})
 }
 
@@ -966,6 +1050,190 @@ func (s *Session) loadGotinData() {
 			}
 		}
 	}
+	if td.MappingOptions != nil {
+		s.mappingOptionsTop = td.MappingOptions
+	}
+	if td.MUDProfiles != nil {
+		s.mudProfiles = td.MUDProfiles
+	}
+}
+
+func (s *Session) resolveMappingOptions(host string, port int) (mapper.MappingOptions, string, string) {
+	conns := s.model.GetConnections()
+	names := make([]string, 0, len(conns))
+	for name := range conns {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		ca := conns[name]
+		if ca.Host == host && ca.Port == port {
+			if ca.MappingOptions != nil {
+				return *ca.MappingOptions, "alias", name
+			}
+			if s.mappingOptionsTop != nil {
+				return *s.mappingOptionsTop, "alias", name
+			}
+			return mapper.DefaultMappingOptions(), "alias", name
+		}
+	}
+	if s.mappingOptionsTop != nil {
+		return *s.mappingOptionsTop, "global", ""
+	}
+	return mapper.DefaultMappingOptions(), "global", ""
+}
+
+func (s *Session) installProtocolLogger(c *network.Client) {
+	if s.protoLog == nil || c == nil {
+		return
+	}
+	if g := findGMCP(c); g != nil {
+		g.SetLogger(s.protoLog)
+	}
+	if m := findMXP(c); m != nil {
+		m.SetLogger(s.protoLog)
+	}
+	c.SetProtocolLogger(s.protoLog)
+}
+
+func (s *Session) configureMXP(c *network.Client) {
+	m := findMXP(c)
+	if m == nil {
+		s.roomBuf = nil
+		return
+	}
+	profile := s.mapEngine.GetMUDProfile()
+	if s.roomBuf == nil {
+		cp, err := profile.Compile()
+		if err != nil {
+			s.trySendUI(ui.StatusMsg{Message: fmt.Sprintf("[Map] profile compile error: %v\n", err)})
+		} else {
+			s.roomBuf = mapper.NewRoomBlockBuffer(cp, s.onRoomBlock)
+		}
+	}
+	var inner mxp.Sink
+	if s.roomBuf != nil {
+		inner = s.roomBuf
+	} else {
+		inner = noopSink{}
+	}
+	m.SetSink(sentinelSink{
+		inner:         inner,
+		engine:        s.mapEngine,
+		blockStartTag: profile.BlockStartTag,
+	})
+	m.SetSentinelResetCallback(func() {
+		s.mapEngine.ResetBlockStart()
+		if s.roomBuf != nil {
+			s.roomBuf.Reset()
+		}
+	})
+	m.SetRoomNameCallback(func(name string) {
+		if name == "" {
+			return
+		}
+		s.mapEngine.SetIncomingRoomName(name)
+		s.trySendUI(ui.RoomNameMsg{Name: name})
+	})
+	if s.protoLog != nil {
+		m.SetLogger(s.protoLog)
+	}
+}
+
+func (s *Session) resolveMUDProfile(host string) mapper.MUDProfile {
+	base := mapper.DefaultT2TMUDProfile()
+	if s.mudProfiles == nil {
+		return base
+	}
+	if over, ok := lookupProfile(s.mudProfiles, host); ok {
+		return mapper.MergeProfile(base, over)
+	}
+	return base
+}
+
+// lookupProfile finds a MUDProfile by host (case-insensitive).
+func lookupProfile(m map[string]mapper.MUDProfile, host string) (mapper.MUDProfile, bool) {
+	for k, v := range m {
+		if strings.EqualFold(k, host) {
+			return v, true
+		}
+	}
+	return mapper.MUDProfile{}, false
+}
+
+// sentinelSink wraps a sink so every observed MXP tag updates mapper sentinels.
+type sentinelSink struct {
+	inner         mxp.Sink
+	engine        *mapper.Engine
+	blockStartTag string
+}
+
+func (s sentinelSink) OnText(t string) { s.inner.OnText(t) }
+
+func (s sentinelSink) OnTag(name, body string) {
+	s.engine.MarkMXPSeen()
+	if name == s.blockStartTag {
+		s.engine.MarkBlockStartSeen()
+	}
+	s.inner.OnTag(name, body)
+}
+
+type noopSink struct{}
+
+func (noopSink) OnText(string)        {}
+func (noopSink) OnTag(string, string) {}
+
+func (s *Session) scheduleMapOptionsSave(opts mapper.MappingOptions) {
+	if s.mappingOptionsScope == "alias" && s.mappingOptionsAlias != "" {
+		conns := s.model.GetConnections()
+		if ca, ok := conns[s.mappingOptionsAlias]; ok {
+			o := opts
+			ca.MappingOptions = &o
+			conns[s.mappingOptionsAlias] = ca
+			s.model.SetConnections(conns)
+		}
+	} else {
+		o := opts
+		s.mappingOptionsTop = &o
+	}
+	s.persistGotinData()
+}
+
+func (s *Session) persistGotinData() {
+	aliases := s.model.GetAliases()
+	triggers := s.te.ListTriggers()
+	connections := s.model.GetConnections()
+
+	td := gotinData{
+		Aliases:        aliases,
+		Triggers:       make([]config.TriggerConfig, len(triggers)),
+		Connections:    connections,
+		MappingOptions: s.mappingOptionsTop,
+		MUDProfiles:    s.mudProfiles,
+	}
+	for i, t := range triggers {
+		td.Triggers[i] = config.TriggerConfig{
+			Pattern:  t.Pattern.String(),
+			Response: t.Response,
+		}
+	}
+
+	fileData, err := json.MarshalIndent(td, "", "  ")
+	if err != nil {
+		return
+	}
+	tmp := "gotin.json.tmp"
+	if err := os.WriteFile(tmp, fileData, 0644); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, "gotin.json")
+}
+
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
 }
 
 func historyFilePath() (string, error) {
