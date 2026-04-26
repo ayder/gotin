@@ -9,7 +9,6 @@
 *.dll
 *.so
 *.dylib
-gotin
 
 # Test artifacts
 *test.log
@@ -20,6 +19,7 @@ gotin
 *.swp
 *.swo
 .ayder
+.claude
 
 # OS
 .DS_Store
