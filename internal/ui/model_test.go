@@ -57,6 +57,29 @@ func TestMapPaneToggle_OffRestoresFullViewport(t *testing.T) {
 // quiet unused-import: mapper used by later tests.
 var _ = mapper.Direction("")
 
+func TestPaneKeys_EscClosesWhenEmpty(t *testing.T) {
+	m := freshModel(80, 24)
+	tm, _ := m.Update(MapPaneToggleMsg{})
+	m = tm.(Model)
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = tm.(Model)
+	if m.mapPaneVisible {
+		t.Error("Esc did not close pane")
+	}
+}
+
+func TestPaneKeys_EscDoesNotCloseWhenTyping(t *testing.T) {
+	m := freshModel(80, 24)
+	tm, _ := m.Update(MapPaneToggleMsg{})
+	m = tm.(Model)
+	m.textinput.SetValue("look")
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = tm.(Model)
+	if !m.mapPaneVisible {
+		t.Error("Esc must not close pane while user is typing")
+	}
+}
+
 func TestPaneKeys_PanOnlyWhenInputEmpty(t *testing.T) {
 	m := freshModel(80, 24)
 	mm := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{
