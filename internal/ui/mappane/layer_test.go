@@ -119,3 +119,51 @@ func TestAllLayers_NilAndEmpty(t *testing.T) {
 		t.Errorf("empty: got %v", got)
 	}
 }
+
+func TestLayerLabel_ModeOfNamesWinsTiesByLex(t *testing.T) {
+	// Layer with three rooms named "Bree", two "Bree", one "Inn" -> "Bree".
+	rooms := map[string]*mapper.Room{
+		"a": makeRoom("a", 0, 0, 0), "b": makeRoom("b", 1, 0, 0), "c": makeRoom("c", 2, 0, 0),
+	}
+	rooms["a"].Name = "Bree"
+	rooms["b"].Name = "Bree"
+	rooms["c"].Name = "Inn"
+	rooms["a"].Exits = map[mapper.Direction]string{mapper.East: "b"}
+	rooms["b"].Exits = map[mapper.Direction]string{mapper.West: "a", mapper.East: "c"}
+	rooms["c"].Exits = map[mapper.Direction]string{mapper.West: "b"}
+	m := &mapper.Map{Rooms: rooms}
+
+	got := LayerLabel(m, LayerOf(m, "a"), "a")
+	if got != "Bree" {
+		t.Errorf("LayerLabel = %q, want %q", got, "Bree")
+	}
+}
+
+func TestLayerLabel_IgnoresPlaceholderNames(t *testing.T) {
+	rooms := map[string]*mapper.Room{
+		"a": makeRoom("a", 0, 0, 0), "b": makeRoom("b", 1, 0, 0),
+	}
+	rooms["a"].Name = "New Room"
+	rooms["b"].Name = ""
+	rooms["a"].Exits = map[mapper.Direction]string{mapper.East: "b"}
+	rooms["b"].Exits = map[mapper.Direction]string{mapper.West: "a"}
+	m := &mapper.Map{Rooms: rooms}
+	if got := LayerLabel(m, LayerOf(m, "a"), "a"); got != "Unnamed Layer" {
+		t.Errorf("LayerLabel = %q, want %q", got, "Unnamed Layer")
+	}
+}
+
+func TestLayerLabel_ZAnnotation(t *testing.T) {
+	rooms := map[string]*mapper.Room{
+		"a": makeRoom("a", 0, 0, 1), "b": makeRoom("b", 1, 0, 1),
+	}
+	rooms["a"].Name, rooms["b"].Name = "Floor", "Floor"
+	rooms["a"].Exits = map[mapper.Direction]string{mapper.East: "b"}
+	rooms["b"].Exits = map[mapper.Direction]string{mapper.West: "a"}
+	m := &mapper.Map{Rooms: rooms}
+
+	got := LayerLabel(m, LayerOf(m, "a"), "a")
+	if got != "Floor [Z=1]" {
+		t.Errorf("LayerLabel = %q, want %q", got, "Floor [Z=1]")
+	}
+}

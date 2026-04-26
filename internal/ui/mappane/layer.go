@@ -1,6 +1,7 @@
 package mappane
 
 import (
+	"fmt"
 	"sort"
 
 	"github.com/ayder/gotin/internal/mapper"
@@ -88,4 +89,76 @@ func AllLayers(m *mapper.Map) []string {
 	}
 	sort.Strings(reps)
 	return reps
+}
+
+// placeholderName returns true for names that should not vote in the
+// layer-label heuristic.
+func placeholderName(s string) bool {
+	switch s {
+	case "", "New Room", "Start":
+		return true
+	}
+	return false
+}
+
+// LayerLabel produces the human-friendly heading rendered above the map
+// pane body. layer must be the result of LayerOf(m, currentID); currentID
+// is used as the final fallback when no real names are available.
+func LayerLabel(m *mapper.Map, layer map[string]struct{}, currentID string) string {
+	if m == nil || len(layer) == 0 {
+		return "Unnamed Layer"
+	}
+	counts := map[string]int{}
+	for id := range layer {
+		r, ok := m.Rooms[id]
+		if !ok {
+			continue
+		}
+		if placeholderName(r.Name) {
+			continue
+		}
+		counts[r.Name]++
+	}
+
+	primary := ""
+	if len(counts) > 0 {
+		// Mode wins; ties broken alphabetically.
+		var names []string
+		for n := range counts {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		bestCount := -1
+		for _, n := range names {
+			if counts[n] > bestCount {
+				bestCount = counts[n]
+				primary = n
+			}
+		}
+	}
+	if primary == "" {
+		if cur, ok := m.Rooms[currentID]; ok && !placeholderName(cur.Name) {
+			primary = cur.Name
+		}
+	}
+	if primary == "" {
+		primary = "Unnamed Layer"
+	}
+
+	// Z annotation.
+	zSet := map[int]struct{}{}
+	for id := range layer {
+		if r, ok := m.Rooms[id]; ok {
+			zSet[r.Z] = struct{}{}
+		}
+	}
+	if len(zSet) > 1 {
+		return primary + " [Z=mixed]"
+	}
+	for z := range zSet {
+		if z != 0 {
+			return fmt.Sprintf("%s [Z=%d]", primary, z)
+		}
+	}
+	return primary
 }
