@@ -355,6 +355,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.confirmPort = msg.Port
 		return m, nil
 
+	case MapPaneToggleMsg:
+		if !m.mapPaneVisible {
+			pw := computeMapPaneWidth(m.width)
+			if pw == 0 {
+				m.statusMsg = "terminal too narrow for /map show"
+				return m, nil
+			}
+			m.mapPaneVisible = true
+			m.mapPaneWidth = pw
+			m.viewport.Width = m.width - pw - 1
+			m.mapPanOffset = mappane.Point{}
+			m.mapPaneLayerKey = ""
+		} else {
+			m.mapPaneVisible = false
+			m.mapPaneWidth = 0
+			m.viewport.Width = m.width
+		}
+		return m, nil
+
+	case MapPaneRecenterMsg:
+		m.mapPanOffset = mappane.Point{}
+		m.mapPaneLayerKey = ""
+		return m, nil
+
 	case SetLocalEchoMsg:
 		if msg.LocalEcho {
 			m.textinput.EchoMode = textinput.EchoNormal
@@ -407,15 +431,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 		viewportHeight := m.height - InputHeight
+		viewportW := m.width
+		if m.mapPaneVisible {
+			pw := computeMapPaneWidth(m.width)
+			if pw == 0 {
+				m.mapPaneVisible = false
+				m.mapPaneWidth = 0
+			} else {
+				m.mapPaneWidth = pw
+				viewportW = m.width - pw - 1
+			}
+		}
 
 		if !m.ready {
 			// First time receiving window size - initialize viewport
-			m.viewport = viewport.New(m.width, viewportHeight)
+			m.viewport = viewport.New(viewportW, viewportHeight)
 			m.viewport.SetContent("")
 			m.ready = true
 		} else {
 			// Resize existing viewport
-			m.viewport.Width = m.width
+			m.viewport.Width = viewportW
 			m.viewport.Height = viewportHeight
 		}
 
