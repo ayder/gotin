@@ -31,11 +31,11 @@
 - `internal/mapper/integration_test.go` — fixture-replay end-to-end test.
 
 **Modify**
-- `internal/mudproto/mxp/mxp.go` — `SetTagCallback`, `onTag` field, fire from `Filter`.
-- `internal/mudproto/mxp/mxp_test.go` — tag callback unit tests.
-- `internal/mapper/mapper.go` — `ComputeStructuralHash`, `normaliseDescription`, `structuralIndex`, `MUDProfile`/`sawBlockStart` fields, `SetMUDProfile`, `MarkBlockStartSeen`, `HasBlockStartSeen`, `ResetBlockStart`, `HandleRoomBlock`.
-- `internal/mapper/mapper_test.go` — tests for hash, sentinel, HandleRoomBlock.
-- `internal/app/app.go` — profile resolution, RoomBlockBuffer wiring, retire `ProcessRoomData`/`HandleGMCPRoomInfo` from production calls, MXP-active gate on `ProcessMovement`, `/map start` warning, `mud_profiles` JSON persistence.
+- `internal/mudproto/mxp/mxp.go` — `Sink` interface, `SetSink`, `SetSentinelResetCallback`, interleaved `OnText`/`OnTag` flush in `Filter`, disable-reset wiring in `OnDisable`.
+- `internal/mudproto/mxp/mxp_test.go` — sink unit tests, disable-reset test.
+- `internal/mapper/mapper.go` — `ComputeStructuralHash`, `normaliseDescription`, `structuralIndex`, `MUDProfile` / `sawMXP` / `sawBlockStart` fields, `SetMUDProfile`, `MarkMXPSeen`, `MarkBlockStartSeen`, `HasMXPSeen`, `HasBlockStartSeen`, `ResetBlockStart`, `HandleRoomBlock`.
+- `internal/mapper/mapper_test.go` — tests for hash, sentinels, HandleRoomBlock.
+- `internal/app/app.go` — profile resolution, `configureMXP(c)` helper used by both `connect()` and `ProtoOn`, RoomBlockBuffer wiring, retire `ProcessRoomData`/`HandleGMCPRoomInfo` from production calls, MXP-active gate on `ProcessMovement`, `/map start` warning, `mud_profiles` JSON persistence, `sentinelSink` adapter, `noopSink`.
 - `gotin.json` — add example `mud_profiles.t2tmud.org` block.
 
 **Checkpoints**
@@ -642,6 +642,101 @@ git add internal/mudproto/mxp/mxp_test.go
 git commit -m "test(mxp): sink fires once after split-tag completion"
 ```
 
+---
+
+### Task 5b: `mxp.OnDisable` resets sentinels and buffer
+
+When the server sends `IAC WONT MXP` (covers t2tmud's in-game `set mxp
+off` command, which renegotiates), or when the user issues `/proto off
+MXP`, the MXP protocol's `OnDisable` fires. The mapper must clear its
+sawMXP / sawBlockStart sentinels and reset the in-flight room buffer
+so a subsequent re-enable starts from a clean slate.
+
+We expose this via `SetSentinelResetCallback(func())` rather than
+hardcoding the mapper dependency in the MXP package.
+
+**Files:**
+- Modify: `internal/mudproto/mxp/mxp.go`
+- Modify: `internal/mudproto/mxp/mxp_test.go`
+
+- [ ] **Step 1: Write failing test**
+
+Add to `mxp_test.go`:
+
+```go
+func TestSetSentinelResetCallback_FiresOnDisable(t *testing.T) {
+	p := New()
+	called := 0
+	p.SetSentinelResetCallback(func() { called++ })
+
+	p.OnDisable(noopCtx{}) // existing test helper from earlier MXP tests
+	if called != 1 {
+		t.Errorf("reset callback fired %d times, want 1", called)
+	}
+}
+
+func TestSetSentinelResetCallback_NilSafe(t *testing.T) {
+	p := New()
+	// No callback registered: OnDisable must not panic.
+	p.OnDisable(noopCtx{})
+}
+```
+
+- [ ] **Step 2: Run test**
+
+Run: `go test ./internal/mudproto/mxp/ -run TestSetSentinelResetCallback -v`
+Expected: FAIL — `SetSentinelResetCallback undefined`.
+
+- [ ] **Step 3: Implement**
+
+In `internal/mudproto/mxp/mxp.go`:
+
+Add field to `Protocol`:
+
+```go
+type Protocol struct {
+	// ...existing fields...
+	onResetSentinels func()
+}
+```
+
+Add setter (place near `SetSink`):
+
+```go
+// SetSentinelResetCallback registers a function called when MXP becomes
+// inactive on this connection (telnet WONT MXP, or protocol uninstall).
+// The mapper uses this to clear its sawMXP / sawBlockStart sentinels and
+// reset the in-flight room buffer.
+func (p *Protocol) SetSentinelResetCallback(cb func()) {
+	p.onResetSentinels = cb
+}
+```
+
+Update `OnDisable`:
+
+```go
+func (p *Protocol) OnDisable(ctx network.Context) {
+	ctx.Debug("MXP: disabled")
+	p.ctx = nil
+	p.pending = ""
+	if p.onResetSentinels != nil {
+		p.onResetSentinels()
+	}
+}
+```
+
+- [ ] **Step 4: Run tests**
+
+Run: `go test ./internal/mudproto/mxp/ -v`
+Expected: PASS for both new tests; existing tests unaffected.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/mudproto/mxp/mxp.go internal/mudproto/mxp/mxp_test.go
+git commit -m "feat(mxp): SetSentinelResetCallback fires on OnDisable"
+```
+
 **CHECKPOINT B complete.**
 
 ---
@@ -965,13 +1060,13 @@ func (b *RoomBlockBuffer) parse(body string) RoomBlock {
 - [ ] **Step 4: Run tests**
 
 Run: `go test ./internal/mapper/ -run TestRoomBlockBuffer_OnText -v`
-Expected: PASS for all three.
+Expected: PASS for all four (Accumulates, Closed, Prompt, PromptWithANSI).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add internal/mapper/blockbuf.go internal/mapper/blockbuf_test.go
-git commit -m "feat(mapper): RoomBlockBuffer.OnText with end-pattern detection"
+git commit -m "feat(mapper): RoomBlockBuffer.OnText with ANSI-tolerant end detection"
 ```
 
 ---
@@ -2242,7 +2337,13 @@ git commit -m "feat(app): resolve MUD profile on connect; persist mud_profiles"
 
 ---
 
-### Task 18: Wire `RoomBlockBuffer` and MXP tag callback
+### Task 18: Wire `RoomBlockBuffer` and MXP segment Sink via `configureMXP` helper
+
+The wiring (sink, room-name callback, sentinel-reset callback, protolog
+logger) needs to fire BOTH on initial `connect()` AND on runtime
+`/proto on MXP` (current code at `app.go:711` installs the protocol but
+calls only `installProtocolLogger`, missing all the other hooks). We
+factor the logic into one helper called from both code paths.
 
 **Files:**
 - Modify: `internal/app/app.go`
@@ -2256,57 +2357,106 @@ type Session struct {
 }
 ```
 
-- [ ] **Step 2: Construct on connect when MXP is installed**
+- [ ] **Step 2: Add the `configureMXP` helper**
 
-In `connect()`, after the block from Task 17 (and before the MXP `SetRoomNameCallback` block), add:
-
-```go
-	// Build the room-block buffer — only effective when MXP is installed.
-	if findMXP(c) != nil {
-		cp, err := resolved.Compile()
-		if err != nil {
-			s.trySendUI(ui.StatusMsg{Message: fmt.Sprintf("[Map] profile compile error: %v\n", err)})
-		} else {
-			s.roomBuf = mapper.NewRoomBlockBuffer(cp, s.onRoomBlock)
-		}
-	} else {
-		s.roomBuf = nil
-	}
-```
-
-- [ ] **Step 3: Install the segment Sink**
-
-Update the MXP-callback block (around `app.go:388`). Use a small adapter
-type so MXP-seen and block-start tracking happen independently of the
-buffer's existence:
-
-```go
-	if m := findMXP(c); m != nil {
-		profile := s.mapEngine.GetMUDProfile()
-		blockStartTag := profile.BlockStartTag
-		var inner mxp.Sink
-		if s.roomBuf != nil {
-			inner = s.roomBuf
-		} else {
-			inner = noopSink{}
-		}
-		m.SetSink(sentinelSink{
-			inner:         inner,
-			engine:        s.mapEngine,
-			blockStartTag: blockStartTag,
-		})
-		m.SetRoomNameCallback(func(name string) {
-			if name == "" {
-				return
-			}
-			s.mapEngine.SetIncomingRoomName(name)
-			s.trySendUI(ui.RoomNameMsg{Name: name})
-		})
-	}
-```
-
-Add the adapter types near the bottom of `app.go` (above
+Place near the existing `installProtocolLogger` (or right above
 `historyFilePath`):
+
+```go
+// configureMXP installs every MXP-side hook that the mapper and UI
+// depend on: protolog logger, room-name callback, segment Sink with
+// sentinel tracking, and disable-reset callback. Idempotent — safe to
+// call multiple times on the same connection (e.g. once on connect and
+// again on /proto on MXP).
+func (s *Session) configureMXP(c *network.Client) {
+	m := findMXP(c)
+	if m == nil {
+		return
+	}
+
+	if s.protoLog != nil {
+		m.SetLogger(s.protoLog)
+	}
+
+	m.SetRoomNameCallback(func(name string) {
+		if name == "" {
+			return
+		}
+		s.mapEngine.SetIncomingRoomName(name)
+		s.trySendUI(ui.RoomNameMsg{Name: name})
+	})
+
+	// Build / rebuild the room-block buffer with the current profile.
+	resolved := s.mapEngine.GetMUDProfile()
+	cp, err := resolved.Compile()
+	if err != nil {
+		s.trySendUI(ui.StatusMsg{Message: fmt.Sprintf("[Map] profile compile error: %v\n", err)})
+		s.roomBuf = nil
+	} else {
+		s.roomBuf = mapper.NewRoomBlockBuffer(cp, s.onRoomBlock)
+	}
+
+	var inner mxp.Sink
+	if s.roomBuf != nil {
+		inner = s.roomBuf
+	} else {
+		inner = noopSink{}
+	}
+	m.SetSink(sentinelSink{
+		inner:         inner,
+		engine:        s.mapEngine,
+		blockStartTag: resolved.BlockStartTag,
+	})
+
+	m.SetSentinelResetCallback(func() {
+		s.mapEngine.ResetBlockStart()
+		if s.roomBuf != nil {
+			s.roomBuf.Reset()
+		}
+	})
+}
+```
+
+- [ ] **Step 3: Call from `connect()`**
+
+In `connect()`, replace the existing per-callback inline blocks (the
+`SetRoomNameCallback` block around line 388 and any related logger
+install) with a single call:
+
+```go
+	s.configureMXP(c)
+```
+
+This call goes after `installProtocols(c, …)` and after the GMCP
+callback wiring. The `s.mapEngine.SetMUDProfile(resolved)` and
+`s.mapEngine.ResetBlockStart()` calls from Task 17 still happen BEFORE
+`configureMXP` so the helper picks up the current profile.
+
+- [ ] **Step 4: Call from `ProtoOn` for runtime MXP enable**
+
+In the `case *command.ProtoOn:` block (around `app.go:711`), after the
+existing `s.installProtocolLogger(cl)` call:
+
+```go
+		if err := cl.Install(factory()); err != nil {
+			s.program.Send(ui.StatusMsg{Message: fmt.Sprintf("%s install failed: %v\n", c.Name, err)})
+		} else {
+			s.installProtocolLogger(cl)
+			if c.Name == "MXP" {
+				s.configureMXP(cl)
+			}
+			s.program.Send(ui.StatusMsg{Message: fmt.Sprintf("[proto] %s enabled\n", c.Name)})
+		}
+```
+
+Note: when MXP is uninstalled via `/proto off MXP`, the protocol's
+`OnDisable` fires inside `cl.Uninstall(...)` which (from Task 5b) calls
+the `SetSentinelResetCallback` — so the sentinels and buffer clear
+automatically. No additional code in `ProtoOff`.
+
+- [ ] **Step 5: Add the adapter types**
+
+Add near the bottom of `app.go` (above `historyFilePath`):
 
 ```go
 // sentinelSink wraps a mapper Sink so every observed MXP tag updates the
@@ -2330,11 +2480,11 @@ func (s sentinelSink) OnTag(name, body string) {
 }
 
 // noopSink swallows sink calls; used when the buffer isn't constructed
-// (profile-compile failure or MXP not installed). Sentinel tracking
-// still wraps it so HasMXPSeen reflects reality.
+// (profile-compile failure). Sentinel tracking still wraps it so
+// HasMXPSeen reflects reality.
 type noopSink struct{}
 
-func (noopSink) OnText(string)     {}
+func (noopSink) OnText(string)        {}
 func (noopSink) OnTag(string, string) {}
 ```
 
@@ -2790,19 +2940,42 @@ grep -c '"event":"tag"' gotin.log      # confirm protolog still firing
 
 - [ ] **Step 4: Manual verification — MXP off path**
 
+The warning is gated on `HasMXPSeen()`, which flips to true on the first
+MXP tag. To exercise the warning reliably, MXP must be **off before any
+tags arrive** — not toggled off mid-session after the engine has
+already seen tags.
+
+Two ways to set this up. Pick one:
+
+**Option A — config-file disable:**
+
 ```bash
-./gotin -debug -host t2tmud.org -port 9999
-# After connect, type:
-set mxp off
-# Then in-client:
+# Edit gotin.json: under connections.t2t.protocols, set "MXP": false
+./gotin -debug
+```
+
+**Option B — runtime disable immediately on connect:**
+
+```bash
+./gotin -debug
+# At the very first prompt (no actions taken yet), type:
+/proto off MXP
+```
+
+Then in-client:
+
+```
 /map start
 ```
 
 Expected: status line says
-`[Map] Auto-mapping enabled, but MXP is not active on this connection. /map dig still works manually; auto-rooms will not appear until you reconnect with MXP enabled.`
+`[Map] Auto-mapping enabled, but no MXP tags have been observed yet. /map dig still works manually; auto-rooms will appear once the server emits MXP-wrapped room data.`
 
 Walking a direction does **not** create rooms. `/map dig east "test"`
 does create a room. `/quit`.
+
+(After this verification, restore `"MXP": true` in `gotin.json` so the
+default flow on subsequent runs is back to normal.)
 
 - [ ] **Step 5: Push branch and open PR**
 
@@ -2822,6 +2995,8 @@ gh pr create --title "Mapper Phase 2: structural MXP path with t2tmud profile" \
 - ✅ Strict gate (MXP-seen sentinel + block-start sentinel) — Tasks 12, 15, 16, 18.
 - ✅ Hard-coded t2tmud profile + JSON override — Tasks 1–3, 17.
 - ✅ MXP segment Sink (correct text/tag interleaving) — Tasks 4–5.
+- ✅ Sentinel reset on MXP disable / `/proto off MXP` — Task 5b, 18.
+- ✅ Runtime `/proto on MXP` re-installs all hooks — Task 18 (`configureMXP`).
 - ✅ ANSI-tolerant prompt regex — Tasks 1, 8.
 - ✅ RoomBlockBuffer with split-chunk safety — Tasks 6–10.
 - ✅ Structural hash with externally visible v2: prefix — Task 11.
