@@ -67,6 +67,51 @@ func TestRender_PaneTooShort(t *testing.T) {
 	}
 }
 
+func TestFooter_NoBridges(t *testing.T) {
+	a := makeRoom("a", 0, 0, 0); a.Name = "A"
+	m := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{"a": a}}
+	got := Render(View{PaneWidth: 30, PaneHeight: 6, Map: m, CurrentID: "a"})
+	lines := strings.Split(got, "\n")
+	if lines[len(lines)-1] != padLine("dig: u/d/in/out", 30) {
+		t.Errorf("footer mismatch: %q", lines[len(lines)-1])
+	}
+}
+
+func TestFooter_ExistingBridgesAndPartialDigHints(t *testing.T) {
+	a := makeRoom("a", 0, 0, 0); a.Name = "A"
+	b := makeRoom("b", 0, 0, 1); b.Name = "Stairs"
+	a.Exits[mapper.Up] = "b"
+	b.Exits[mapper.Down] = "a"
+	m := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{"a": a, "b": b}}
+	got := Render(View{PaneWidth: 40, PaneHeight: 6, Map: m, CurrentID: "a"})
+	lines := strings.Split(got, "\n")
+	want := padLine("↑ Stairs | dig: d/in/out", 40)
+	if lines[len(lines)-1] != want {
+		t.Errorf("footer mismatch:\nGOT:  %q\nWANT: %q", lines[len(lines)-1], want)
+	}
+}
+
+func TestFooter_AllFourBridgesNoDigHint(t *testing.T) {
+	a := makeRoom("a", 0, 0, 0)
+	a.Exits = map[mapper.Direction]string{
+		mapper.Up: "u", mapper.Down: "d", mapper.In: "i", mapper.Out: "o",
+	}
+	rooms := map[string]*mapper.Room{
+		"a": a,
+		"u": {ID: "u", Name: "UpRoom", Exits: map[mapper.Direction]string{mapper.Down: "a"}},
+		"d": {ID: "d", Name: "DnRoom", Exits: map[mapper.Direction]string{mapper.Up: "a"}},
+		"i": {ID: "i", Name: "InRoom", Exits: map[mapper.Direction]string{mapper.Out: "a"}},
+		"o": {ID: "o", Name: "OutRoom", Exits: map[mapper.Direction]string{mapper.In: "a"}},
+	}
+	m := &mapper.Map{CurrentRoom: "a", Rooms: rooms}
+	got := Render(View{PaneWidth: 60, PaneHeight: 6, Map: m, CurrentID: "a"})
+	lines := strings.Split(got, "\n")
+	want := padLine("↑ UpRoom | ↓ DnRoom | ▶ InRoom | ◀ OutRoom", 60)
+	if lines[len(lines)-1] != want {
+		t.Errorf("footer mismatch:\nGOT:  %q\nWANT: %q", lines[len(lines)-1], want)
+	}
+}
+
 func TestRender_BridgeOverlay_CardinalWinsOverArrow(t *testing.T) {
 	a := makeRoom("a", 0, 0, 0); a.Name = "A"
 	b := makeRoom("b", 0, 1, 0); b.Name = "B"
