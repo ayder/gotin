@@ -46,33 +46,7 @@ func (c *digCmd) execute(e *Engine) error {
 		return fmt.Errorf("exit %s already exists", c.dir)
 	}
 
-	nx, ny, nz := curr.X, curr.Y, curr.Z
-	switch c.dir {
-	case North:
-		ny++
-	case South:
-		ny--
-	case East:
-		nx++
-	case West:
-		nx--
-	case NorthEast:
-		nx++
-		ny++
-	case SouthWest:
-		nx--
-		ny--
-	case NorthWest:
-		nx--
-		ny++
-	case SouthEast:
-		nx++
-		ny--
-	case Up:
-		nz++
-	case Down:
-		nz--
-	}
+	nx, ny, nz := e.placeRoom(curr, c.dir)
 
 	newRoom := &Room{
 		ID:    uuid.New().String(),
@@ -275,6 +249,7 @@ type snapshotCmd struct {
 	snapshot        *Map
 	pendingDir      Direction
 	pendingFromRoom string
+	pendingName     string
 }
 
 func (c *snapshotCmd) execute(e *Engine) error { return nil }
@@ -283,5 +258,6 @@ func (c *snapshotCmd) undo(e *Engine) error {
 	e.data = c.snapshot
 	e.pendingDir = c.pendingDir
 	e.pendingFromRoom = c.pendingFromRoom
+	e.pendingName = c.pendingName
 	return nil
 }

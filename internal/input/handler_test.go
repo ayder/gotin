@@ -95,11 +95,11 @@ func TestHandleInput_ConnectValidation(t *testing.T) {
 	h := NewHandler()
 
 	tests := []struct {
-		name       string
-		input      string
-		wantOK     bool
-		wantHost   string
-		wantPort   int
+		name     string
+		input    string
+		wantOK   bool
+		wantHost string
+		wantPort int
 	}{
 		{
 			name:     "valid connect",
@@ -628,5 +628,34 @@ func TestCmdMap_Show(t *testing.T) {
 	}
 	if _, ok := res[0].Command.(*command.MapShow); !ok {
 		t.Errorf("expected *command.MapShow, got %T", res[0].Command)
+	}
+}
+
+func TestCmdMap_Refresh(t *testing.T) {
+	h := NewHandler()
+	res := h.HandleInput("/map refresh")
+	if len(res) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(res))
+	}
+	if _, ok := res[0].Command.(*command.MapRefresh); !ok {
+		t.Errorf("expected *command.MapRefresh, got %T", res[0].Command)
+	}
+}
+
+func TestSaveLoadDefaultConfigFilename(t *testing.T) {
+	h := NewHandler()
+	save := h.HandleInput("/save")
+	if len(save) != 1 {
+		t.Fatalf("save results = %d, want 1", len(save))
+	}
+	if got, ok := save[0].Command.(*command.Save); !ok || got.Filename != "config.json" {
+		t.Fatalf("/save command = %#v, want *command.Save config.json", save[0].Command)
+	}
+	load := h.HandleInput("/load")
+	if len(load) != 1 {
+		t.Fatalf("load results = %d, want 1", len(load))
+	}
+	if got, ok := load[0].Command.(*command.Load); !ok || got.Filename != "config.json" {
+		t.Fatalf("/load command = %#v, want *command.Load config.json", load[0].Command)
 	}
 }

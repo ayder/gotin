@@ -65,27 +65,27 @@ type ConfirmConnectMsg struct {
 
 // Model represents the TUI state for the MUD client.
 type Model struct {
-	viewport       viewport.Model
-	textinput      textinput.Model
-	history        *input.History
-	commandHandler *input.Handler
-	ready          bool
-	width          int
-	height         int
-	content          []string // stores all lines displayed in viewport
-	statusMsg        string   // stores current status for border title
-	activeProtocols  []string // negotiated MUD protocols, rendered as badges under the input box
-	currentRoomName  string   // last room name received from GMCP Room.Info
-	showHelp       bool     // whether the help widget is visible
-	helpViewport   viewport.Model // scrollable help content
-	helpReady      bool     // helpViewport sized at least once
-	showConfirmConnect bool   // whether the connection confirmation widget is visible
-	confirmHost    string   // pending connection host for confirmation widget
-	confirmPort    int      // pending connection port for confirmation widget
-	confirmCurrentHost string // current connection host for confirmation widget
-	confirmCurrentPort int    // current connection port for confirmation widget
-	contentDirty   bool     // set when appendContent modifies m.content but viewport hasn't been updated yet
-	pendingTick    bool     // true while a renderTickMsg is queued
+	viewport           viewport.Model
+	textinput          textinput.Model
+	history            *input.History
+	commandHandler     *input.Handler
+	ready              bool
+	width              int
+	height             int
+	content            []string       // stores all lines displayed in viewport
+	statusMsg          string         // stores current status for border title
+	activeProtocols    []string       // negotiated MUD protocols, rendered as badges under the input box
+	currentRoomName    string         // last room name received from GMCP Room.Info
+	showHelp           bool           // whether the help widget is visible
+	helpViewport       viewport.Model // scrollable help content
+	helpReady          bool           // helpViewport sized at least once
+	showConfirmConnect bool           // whether the connection confirmation widget is visible
+	confirmHost        string         // pending connection host for confirmation widget
+	confirmPort        int            // pending connection port for confirmation widget
+	confirmCurrentHost string         // current connection host for confirmation widget
+	confirmCurrentPort int            // current connection port for confirmation widget
+	contentDirty       bool           // set when appendContent modifies m.content but viewport hasn't been updated yet
+	pendingTick        bool           // true while a renderTickMsg is queued
 
 	// Map pane (side-by-side renderer for /map show).
 	mapPaneVisible    bool
@@ -96,7 +96,7 @@ type Model struct {
 	mapEngineSnapshot func() (*mapper.Map, string)
 
 	// Channels for command routing
-	SendChan  chan<- string         // Channel to send commands to server
+	SendChan  chan<- string          // Channel to send commands to server
 	LocalChan chan<- command.Command // Channel for local command actions
 
 	// Callbacks
@@ -170,7 +170,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		if m.mapPaneVisible && m.textinput.Value() == "" {
+		if m.mapPaneVisible {
 			if handled, nm, cmd := m.handleMapPaneKey(msg); handled {
 				return nm, cmd
 			}
@@ -252,6 +252,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case tea.KeyCtrlB:
 			m.toggleMapPane()
+			return m, nil
+		case tea.KeyCtrlR:
+			if m.mapPaneVisible && m.LocalChan != nil {
+				select {
+				case m.LocalChan <- &command.MapRefresh{}:
+				default:
+				}
+			}
 			return m, nil
 		case tea.KeyEnter:
 			value := m.textinput.Value()
@@ -383,6 +391,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.confirmCurrentPort = msg.CurrentPort
 		m.confirmHost = msg.Host
 		m.confirmPort = msg.Port
+		return m, nil
+
+	case SetMapEngineSnapshotMsg:
+		m.mapEngineSnapshot = msg.Fn
 		return m, nil
 
 	case MapPaneToggleMsg:
@@ -554,51 +566,44 @@ func (m *Model) flushViewport() {
 	m.contentDirty = false
 }
 
-// handleMapPaneKey returns (handled, model, cmd). It is invoked only when
-// the pane is visible AND the textinput is empty. It consumes pan, recenter,
-// layer-step, and Esc keys; everything else falls through to normal input
-// processing.
+// handleMapPaneKey returns (handled, model, cmd). It is invoked whenever
+// the pane is visible. Modifier-bearing keys (shift+arrows, F-keys) work
+// while the user is typing and do not collide with macOS OS shortcuts;
+// plain Esc only fires when the input line is empty.
 func (m Model) handleMapPaneKey(msg tea.KeyMsg) (bool, tea.Model, tea.Cmd) {
-	step := 2
-	switch msg.Type {
-	case tea.KeyLeft:
-		m.mapPanOffset.Col -= step
+	colStep := 2
+	rowStep := 1
+	// Shift+arrows pan. F-keys recenter and cycle layers. All work
+	// regardless of whether the user is typing in the input box.
+	switch msg.String() {
+	case "shift+left":
+		m.mapPanOffset.Col -= colStep
 		return true, m, nil
-	case tea.KeyRight:
-		m.mapPanOffset.Col += step
+	case "shift+right":
+		m.mapPanOffset.Col += colStep
 		return true, m, nil
-	case tea.KeyUp:
-		m.mapPanOffset.Row -= step
+	case "shift+up":
+		m.mapPanOffset.Row -= rowStep
 		return true, m, nil
-	case tea.KeyDown:
-		m.mapPanOffset.Row += step
-		return true, m, nil
-	case tea.KeyEsc:
-		m.mapPaneVisible = false
-		m.viewport.Width = m.width
+	case "shift+down":
+		m.mapPanOffset.Row += rowStep
 		return true, m, nil
 	}
-	switch msg.String() {
-	case "h":
-		m.mapPanOffset.Col -= step
-		return true, m, nil
-	case "l":
-		m.mapPanOffset.Col += step
-		return true, m, nil
-	case "k":
-		m.mapPanOffset.Row -= step
-		return true, m, nil
-	case "j":
-		m.mapPanOffset.Row += step
-		return true, m, nil
-	case "c":
+	switch msg.Type {
+	case tea.KeyF5:
 		m.mapPanOffset = mappane.Point{}
 		m.mapPaneLayerKey = ""
 		return true, m, nil
-	case "[":
+	case tea.KeyF3:
 		return true, m.stepLayer(-1), nil
-	case "]":
+	case tea.KeyF4:
 		return true, m.stepLayer(+1), nil
+	}
+	// Esc is the one plain key we still consume — gated on empty input.
+	if m.textinput.Value() == "" && msg.Type == tea.KeyEsc {
+		m.mapPaneVisible = false
+		m.viewport.Width = m.width
+		return true, m, nil
 	}
 	return false, m, nil
 }
@@ -664,9 +669,14 @@ func (m Model) View() string {
 		return mm.renderHelpWidget()
 	}
 
-	// Style for the viewport (no border)
+	// Style for the viewport (no border). Shrink to leave room for the
+	// map pane + separator when the pane is visible.
+	viewportWidth := mm.width
+	if mm.mapPaneVisible && mm.mapPaneWidth > 0 {
+		viewportWidth = mm.width - mm.mapPaneWidth - 1
+	}
 	viewportStyle := lipgloss.NewStyle().
-		Width(mm.width).
+		Width(viewportWidth).
 		Height(mm.height - InputHeight)
 
 	// Style for the input border
@@ -797,7 +807,7 @@ func (m Model) renderProtocolBadges() string {
 		}
 	}
 
-	hint := "ctrl-h for help  ctrl-b for map display"
+	hint := "ctrl-h for help  ctrl-b for map display  ctrl-r refresh map"
 	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	hintWidth := lipgloss.Width(hintStyle.Render(hint))
 	if hintPlainWidth := len(hint); hintPlainWidth > hintWidth {

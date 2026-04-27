@@ -1,0 +1,9 @@
+<expire>    Gently rolling plains extend into the distance.  The grass sways
+before the wind in unbroken waves, with isolated trees, like distant
+ships, completing the nautical likeness.
+The Lune River lies northwest.
+The sky is black and the stars shine down brightly.
+The sky is brilliantly clear.
+    There is water to the <w>northwest</w>.
+    The only obvious exits are <x>east</x>, <x>north</x>, <x>west</x> and <x>south</x>.
+HP:70 EP:70 [WA] > 

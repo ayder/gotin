@@ -90,15 +90,19 @@ type Room struct {
 
 // Map holds the world state.
 type Map struct {
-	Rooms       map[string]*Room `json:"rooms"`
-	CurrentRoom string           `json:"current_room"`
+	Rooms         map[string]*Room `json:"rooms"`
+	CurrentRoom   string           `json:"current_room"`
+	LayoutVersion int              `json:"layout_version"`
 }
+
+const CurrentLayoutVersion = 1
 
 // deepCopy returns a fully independent copy of the map.
 func (m *Map) deepCopy() *Map {
 	copy := &Map{
-		Rooms:       make(map[string]*Room, len(m.Rooms)),
-		CurrentRoom: m.CurrentRoom,
+		Rooms:         make(map[string]*Room, len(m.Rooms)),
+		CurrentRoom:   m.CurrentRoom,
+		LayoutVersion: m.LayoutVersion,
 	}
 	for id, room := range m.Rooms {
 		r := &Room{
@@ -443,6 +447,10 @@ func (e *Engine) Create(filename string) error {
 			}
 			// Rebuild hash index from loaded rooms
 			e.rebuildHashIndex()
+			if e.data.LayoutVersion < CurrentLayoutVersion {
+				NewSolver(SolverConfig{}).Solve(e.data)
+				e.data.LayoutVersion = CurrentLayoutVersion
+			}
 			return nil
 		} else if !os.IsNotExist(err) {
 			return err
@@ -451,7 +459,8 @@ func (e *Engine) Create(filename string) error {
 
 	// Init fresh if load failed or not requested
 	e.data = &Map{
-		Rooms: make(map[string]*Room),
+		Rooms:         make(map[string]*Room),
+		LayoutVersion: CurrentLayoutVersion,
 	}
 	e.hashIndex = make(map[string]string)
 	e.structuralIndex = make(map[string]string)
@@ -698,6 +707,18 @@ func (e *Engine) Save() error {
 	return os.WriteFile(e.path, data, 0644)
 }
 
+// Refresh re-runs the settled-grid layout solver across all Z-layers. The
+// pre-refresh map state is pushed onto the undo stack so /map undo can
+// recover hand-placed coordinates that were displaced by the solver.
+func (e *Engine) Refresh() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.saveState()
+	NewSolver(SolverConfig{}).Solve(e.data)
+	e.data.LayoutVersion = CurrentLayoutVersion
+	return nil
+}
+
 func (e *Engine) GetCurrent() *Room {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -911,6 +932,13 @@ func (e *Engine) HandleRoomBlock(b RoomBlock) (processed bool, roomName string, 
 			}
 		}
 	}
+	if existingID := e.findNearbyMatch(fromRoom, e.pendingDir, b); existingID != "" {
+		if existing, ok := e.data.Rooms[existingID]; ok {
+			e.saveState()
+			e.completePendingMovement(fromRoom, e.pendingDir, existingID, existing)
+			return true, existing.Name, true, nil
+		}
+	}
 
 	var newID string
 	if e.options.Vnum && b.Vnum != "" {
@@ -948,33 +976,7 @@ func (e *Engine) completePendingMovement(fromRoom *Room, dir Direction, existing
 // given direction, links it bidirectionally, and clears pending state.
 // The caller must have already called saveState() and must hold e.mu.
 func (e *Engine) createRoom(fromRoom *Room, dir Direction, id, name, description, descHash string) *Room {
-	nx, ny, nz := fromRoom.X, fromRoom.Y, fromRoom.Z
-	switch dir {
-	case North:
-		ny++
-	case South:
-		ny--
-	case East:
-		nx++
-	case West:
-		nx--
-	case NorthEast:
-		nx++
-		ny++
-	case SouthWest:
-		nx--
-		ny--
-	case NorthWest:
-		nx--
-		ny++
-	case SouthEast:
-		nx++
-		ny--
-	case Up:
-		nz++
-	case Down:
-		nz--
-	}
+	nx, ny, nz := e.placeRoom(fromRoom, dir)
 
 	effectiveName := name
 	if effectiveName == "" || effectiveName == "New Room" {
@@ -1016,33 +1018,7 @@ func (e *Engine) createRoom(fromRoom *Room, dir Direction, id, name, description
 // createRoomV2 mirrors createRoom but writes into structuralIndex instead of
 // the legacy hashIndex. Caller must hold e.mu.
 func (e *Engine) createRoomV2(fromRoom *Room, dir Direction, id, name, description, descHash string) *Room {
-	nx, ny, nz := fromRoom.X, fromRoom.Y, fromRoom.Z
-	switch dir {
-	case North:
-		ny++
-	case South:
-		ny--
-	case East:
-		nx++
-	case West:
-		nx--
-	case NorthEast:
-		nx++
-		ny++
-	case SouthWest:
-		nx--
-		ny--
-	case NorthWest:
-		nx--
-		ny++
-	case SouthEast:
-		nx++
-		ny--
-	case Up:
-		nz++
-	case Down:
-		nz--
-	}
+	nx, ny, nz := e.placeRoom(fromRoom, dir)
 
 	effectiveName := name
 	if effectiveName == "" || effectiveName == "New Room" {
@@ -1079,6 +1055,121 @@ func (e *Engine) createRoomV2(fromRoom *Room, dir Direction, id, name, descripti
 	e.pendingFromRoom = ""
 
 	return room
+}
+
+// placeRoom returns coordinates for a new room from fromRoom in dir. It uses
+// the direction unit vector as the seed and, when occupied, deterministically
+// scans outward for the nearest free cell on the destination Z layer.
+//
+// Caller must hold e.mu.
+func (e *Engine) placeRoom(fromRoom *Room, dir Direction) (int, int, int) {
+	dx, dy, dz, ok := DirectionVector(dir)
+	nx, ny, nz := fromRoom.X+dx, fromRoom.Y+dy, fromRoom.Z+dz
+	if !ok {
+		return nx, ny, nz
+	}
+	if dz != 0 {
+		nx, ny = fromRoom.X, fromRoom.Y
+	}
+	occupied := make(map[[2]int]bool, len(e.data.Rooms))
+	for _, r := range e.data.Rooms {
+		if r.Z == nz {
+			occupied[[2]int{r.X, r.Y}] = true
+		}
+	}
+	if !occupied[[2]int{nx, ny}] {
+		return nx, ny, nz
+	}
+	fx, fy := nearestFree(nx, ny, occupied)
+	return fx, fy, nz
+}
+
+// findNearbyMatch implements the always-on proximity gate. It links to the
+// closest existing room within 2 cells of the seed when the reverse slot is
+// safe, the existing known exits are a subset of incoming exits, and identity
+// is supported by a hash or long shared description prefix.
+//
+// Caller must hold e.mu.
+func (e *Engine) findNearbyMatch(fromRoom *Room, dir Direction, b RoomBlock) string {
+	dx, dy, dz, ok := DirectionVector(dir)
+	if !ok {
+		return ""
+	}
+	seedX, seedY, seedZ := fromRoom.X+dx, fromRoom.Y+dy, fromRoom.Z+dz
+	if dz != 0 {
+		seedX, seedY = fromRoom.X, fromRoom.Y
+	}
+	rev := ReverseDirection(dir)
+
+	incoming := make(map[Direction]struct{}, len(b.Exits))
+	normalisedExits := make([]string, 0, len(b.Exits))
+	for _, raw := range b.Exits {
+		if d, ok := ParseDirection(raw); ok {
+			incoming[d] = struct{}{}
+			normalisedExits = append(normalisedExits, string(d))
+		}
+	}
+	structuralHash := ComputeStructuralHash(b.Description, normalisedExits)
+	legacyHash := ComputeRoomHash(b.Description, normalisedExits)
+
+	type cand struct {
+		id   string
+		dist int
+	}
+	var cands []cand
+	for id, r := range e.data.Rooms {
+		if r == nil || id == fromRoom.ID || r.Z != seedZ {
+			continue
+		}
+		dist := absInt(r.X-seedX) + absInt(r.Y-seedY)
+		if dist > 2 {
+			continue
+		}
+		if rev != "" {
+			if existingFrom, hasRev := r.Exits[rev]; hasRev && existingFrom != "" && existingFrom != fromRoom.ID {
+				continue
+			}
+		}
+		subset := true
+		for known := range r.Exits {
+			if _, ok := incoming[known]; !ok {
+				subset = false
+				break
+			}
+		}
+		if !subset {
+			continue
+		}
+		hashNear := r.DescriptionHash != "" && (r.DescriptionHash == structuralHash || r.DescriptionHash == legacyHash)
+		prefixOK := sharedPrefix(r.Description, b.Description) >= 32
+		if !hashNear && !prefixOK {
+			continue
+		}
+		cands = append(cands, cand{id: id, dist: dist})
+	}
+	if len(cands) == 0 {
+		return ""
+	}
+	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].dist != cands[j].dist {
+			return cands[i].dist < cands[j].dist
+		}
+		return cands[i].id < cands[j].id
+	})
+	return cands[0].id
+}
+
+func sharedPrefix(a, b string) int {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	for i := 0; i < n; i++ {
+		if a[i] != b[i] {
+			return i
+		}
+	}
+	return n
 }
 
 // ProcessRoomData processes incoming room data for smart auto-mapping.
@@ -1125,6 +1216,14 @@ func (e *Engine) ProcessRoomData(text string) (processed bool, roomName string, 
 				e.completePendingMovement(fromRoom, e.pendingDir, existingID, existingRoom)
 				return true, existingRoom.Name, true, nil
 			}
+		}
+	}
+	block := RoomBlock{Description: roomData.RawText, Exits: roomData.Exits}
+	if existingID := e.findNearbyMatch(fromRoom, e.pendingDir, block); existingID != "" {
+		if existingRoom, ok := e.data.Rooms[existingID]; ok {
+			e.saveState()
+			e.completePendingMovement(fromRoom, e.pendingDir, existingID, existingRoom)
+			return true, existingRoom.Name, true, nil
 		}
 	}
 
@@ -1209,6 +1308,14 @@ func (e *Engine) HandleGMCPRoomInfo(r GMCPRoom) (processed bool, roomName string
 				e.completePendingMovement(fromRoom, e.pendingDir, existingID, existingRoom)
 				return true, existingRoom.Name, true, nil
 			}
+		}
+	}
+	block := RoomBlock{Name: r.Name, Description: r.Description, Exits: exits}
+	if existingID := e.findNearbyMatch(fromRoom, e.pendingDir, block); existingID != "" {
+		if existingRoom, ok := e.data.Rooms[existingID]; ok {
+			e.saveState()
+			e.completePendingMovement(fromRoom, e.pendingDir, existingID, existingRoom)
+			return true, existingRoom.Name, true, nil
 		}
 	}
 

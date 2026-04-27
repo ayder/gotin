@@ -1,0 +1,6 @@
+[
+  {"name":"Start","description":"You stand at the meeting point of three old stone paths.","exits":["s","nw","e"]},
+  {"name":"South Glade","description":"A quiet glade with trees rustling overhead.","exits":["n","nw"]},
+  {"name":"NW Cliff","description":"A windswept cliff overlooking the valley.","exits":["se","e"]},
+  {"name":"Start","description":"You stand at the meeting point of three old stone paths.","exits":["s","nw","e"]}
+]

@@ -1,0 +1,33 @@
+{
+  "aliases": {
+    "l": "look"
+  },
+  "triggers": [
+    {
+      "pattern": "^\\[gotin sample trigger\\]$",
+      "response": "look"
+    }
+  ],
+  "connections": {
+    "t2t": {
+      "host": "t2tmud.org",
+      "port": 9999,
+      "auto": true,
+      "protocols": {
+        "MCCP2": true,
+        "MXP": true
+      },
+      "mapping_options": {
+        "vnum": false,
+        "hash": false
+      }
+    }
+  },
+  "mapping_options": {
+    "vnum": false,
+    "hash": true
+  },
+  "mud_profiles": {
+    "t2tmud.org": { "host": "t2tmud.org" }
+  }
+}

@@ -66,7 +66,7 @@ Gotin uses local commands prefixed with `/` to manage the client. All other inpu
 | `/help` | Show available commands. | `/help` |
 
 ## Configuration
-Configuration is stored in `~/.gotin_config.json`. It is automatically created on first run.
+Startup aliases, triggers, connection aliases, mapping options, and MUD parser profiles are read from `config.json` in the working directory. Runtime history and last-host state are stored under `~/.gotin/config.json`.
 
 To manage triggers in-game:
 -   `/trigger add <pattern> <response>`: Add a new trigger.
@@ -139,7 +139,7 @@ n                            # Move north (auto-creates room)
 ```
 
 **Persistence:**
-Maps are saved to the file specified in `/map create`. Triggers and Aliases are saved to `~/.gotin/config.json`.
+Maps are saved to the file specified in `/map create`. `/save` and `/load` default to `config.json` for aliases, triggers, connection aliases, mapping options, and MUD parser profiles.
 *Note: Patterns are Go Regular Expressions.*
 
 ## License

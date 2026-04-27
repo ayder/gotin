@@ -27,6 +27,7 @@ package mxp
 import (
 	"strings"
 
+	"github.com/ayder/gotin/internal/mudproto/protolog"
 	"github.com/ayder/gotin/internal/network"
 )
 
@@ -47,12 +48,24 @@ const (
 	Locked
 )
 
+// Sink receives interleaved text segments and tag observations from Filter()
+// in arrival order. When OnTag fires, all preceding stripped text has already
+// been delivered via OnText.
+type Sink interface {
+	OnText(s string)
+	OnTag(name, body string)
+}
+
 // Protocol is the MXP Protocol implementation.
 type Protocol struct {
 	mode        Mode
 	defaultMode Mode
 	ctx         network.Context // stashed on OnEnable; used to send probe responses
 	onRoomName  func(name string)
+	sink        Sink
+	onReset     func()
+	log         protolog.Logger
+	pending     string // partial tag carried over from the end of the previous chunk
 }
 
 // New returns a new MXP Protocol in Open mode with Open as the default.
@@ -63,6 +76,19 @@ func New() *Protocol { return &Protocol{mode: Open, defaultMode: Open} }
 func (p *Protocol) SetRoomNameCallback(cb func(name string)) {
 	p.onRoomName = cb
 }
+
+// SetSink installs a Sink that receives interleaved text segments and tag
+// observations. Nil disables sink delivery. Filter's string return value is
+// unaffected.
+func (p *Protocol) SetSink(s Sink) { p.sink = s }
+
+// SetSentinelResetCallback registers a callback fired when MXP is disabled.
+// This lets higher layers clear per-connection mapper sentinels without making
+// the protocol package depend on mapper.
+func (p *Protocol) SetSentinelResetCallback(cb func()) { p.onReset = cb }
+
+// SetLogger installs a structured logger; nil disables logging.
+func (p *Protocol) SetLogger(l protolog.Logger) { p.log = l }
 
 // Mode reports the current security mode.
 func (p *Protocol) Mode() Mode { return p.mode }
@@ -103,6 +129,9 @@ func (p *Protocol) OnEnable(ctx network.Context) error {
 func (p *Protocol) OnDisable(ctx network.Context) {
 	ctx.Debug("MXP: disabled")
 	p.ctx = nil
+	if p.onReset != nil {
+		p.onReset()
+	}
 }
 
 // OnSubnegotiation stubs subneg handling for v1. MXP primarily uses inline
@@ -126,26 +155,56 @@ func (*Protocol) OnSubnegotiation(ctx network.Context, data []byte) error {
 // complete MXP tag (no matching '>' in this chunk) is passed through so a
 // split tag can be completed on the next call.
 func (p *Protocol) Filter(s string) string {
+	if p.pending != "" {
+		s = p.pending + s
+		p.pending = ""
+	}
 	if !strings.ContainsAny(s, "<\x1b\n") {
+		if p.sink != nil && s != "" {
+			p.sink.OnText(s)
+		}
 		return s
+	}
+	logOn := p.logEnabled()
+	if logOn && strings.ContainsAny(s, "<\x1b") {
+		p.logEvent("chunk", []byte(s), nil)
 	}
 	var b strings.Builder
 	b.Grow(len(s))
+	lastFlush := 0
+	flush := func() {
+		if p.sink == nil {
+			return
+		}
+		if b.Len() > lastFlush {
+			p.sink.OnText(b.String()[lastFlush:])
+			lastFlush = b.Len()
+		}
+	}
 	for i := 0; i < len(s); {
 		ch := s[i]
 		switch ch {
 		case '<':
-			if end := strings.IndexByte(s[i:], '>'); end >= 0 {
+			if end := findTagEnd(s[i:]); end >= 0 {
 				body := s[i+1 : i+end]
 				p.handleProbe(body)
-				p.handleRoomName(s, i+1, i+end, &b)
+				p.handleRoomName(s, i+1, i+end, &b, logOn)
+				if logOn {
+					p.logEvent("tag", []byte(s[i:i+end+1]), map[string]any{"name": extractTagName(body), "body": body})
+				}
+				if p.sink != nil {
+					flush()
+					p.sink.OnTag(extractTagName(body), body)
+				}
 				i += end + 1
 				continue
 			}
-			// No closing '>' in this chunk — pass through; the tag will
-			// complete in a later call.
-			b.WriteByte(ch)
-			i++
+			// Tag is split across chunks (or has an unclosed quote). Buffer
+			// the remainder so the next Filter call can complete it; flush
+			// what we've consumed so far.
+			p.pending = s[i:]
+			flush()
+			return b.String()
 		case '\x1b':
 			if n, num, ok := parseModeEsc(s[i:]); ok {
 				p.applyMode(num)
@@ -163,6 +222,7 @@ func (p *Protocol) Filter(s string) string {
 			i++
 		}
 	}
+	flush()
 	return b.String()
 }
 
@@ -172,7 +232,7 @@ func (p *Protocol) Filter(s string) string {
 // fired.  The tag pair is consumed (not written to b).  If the close tag is
 // not present in this chunk, the open tag alone is consumed and the name is
 // lost; this is acceptable for v1 because the tag would be stripped anyway.
-func (p *Protocol) handleRoomName(s string, tagStart, tagEnd int, b *strings.Builder) {
+func (p *Protocol) handleRoomName(s string, tagStart, tagEnd int, b *strings.Builder, logOn bool) {
 	name := extractTagName(s[tagStart:tagEnd])
 	if !strings.EqualFold(name, "ROOMNAME") {
 		return
@@ -183,6 +243,9 @@ func (p *Protocol) handleRoomName(s string, tagStart, tagEnd int, b *strings.Bui
 		room := s[tagEnd+1 : tagEnd+1+idx]
 		if p.onRoomName != nil && room != "" {
 			p.onRoomName(room)
+		}
+		if logOn && room != "" {
+			p.logEvent("room_name", []byte(s[tagStart-1:tagEnd+1+idx+len(closeTag)]), map[string]any{"name": room})
 		}
 	}
 }
@@ -234,50 +297,121 @@ func (p *Protocol) sendVersion() {
 		"\" VERSION=\"" + ClientVersion +
 		"\" REGISTERED=\"no\">\n"
 	_ = p.ctx.Send([]byte(msg))
+	if p.logEnabled() {
+		p.logTx("probe", []byte(msg), map[string]any{"kind": "version"})
+	}
 	p.ctx.Debug("MXP: sent VERSION response")
 }
 
 // sendSupports writes a SECURE-line <SUPPORTS ...> listing the tags this
 // client accepts without breaking. v1 strips all tags, so "support" here
-// means "won't choke" rather than "will render richly".
+// means "won't choke" rather than "will render richly". The list is sized
+// to match what servers like t2tmud.org probe for in <SUPPORT>; advertising
+// every queried capability prevents the server from downgrading the session
+// to plain text when it sees a partial reply.
 func (p *Protocol) sendSupports() {
 	if p.ctx == nil {
 		return
 	}
-	const list = "+B +I +U +S +COLOR +C +FONT +HIGH +NOBR +P +BR +SBR +A +SEND"
-	_ = p.ctx.Send([]byte("\x1b[1z<SUPPORTS " + list + ">\n"))
+	const list = "+B +I +U +S +COLOR +C +FONT +HIGH +NOBR +P +BR +SBR " +
+		"+A +SEND +EXPIRE +IMAGE +GAUGE " +
+		"+FONT.FACE +FONT.SIZE +FONT.COLOR +FONT.BACK"
+	msg := "\x1b[1z<SUPPORTS " + list + ">\n"
+	_ = p.ctx.Send([]byte(msg))
+	if p.logEnabled() {
+		p.logTx("probe", []byte(msg), map[string]any{"kind": "supports"})
+	}
 	p.ctx.Debug("MXP: sent SUPPORTS response")
 }
 
 // applyMode updates mode/defaultMode for an ESC [ N z with the given N.
 func (p *Protocol) applyMode(n int) {
+	modeName := "User"
 	switch n {
 	case 0:
 		p.mode = Open
+		modeName = "Open"
 	case 1:
 		p.mode = Secure
+		modeName = "Secure"
 	case 2:
 		p.mode = Locked
+		modeName = "Locked"
 	case 3:
 		// Reset: close all tags (no-op for v1 strip) and revert to default.
 		p.mode = p.defaultMode
+		modeName = "Reset"
 	case 4:
 		// Temp-secure: next tag only. v1 strips all tags anyway, so behave
 		// like Secure for state-tracking purposes.
 		p.mode = Secure
+		modeName = "TempSecure"
 	case 5:
 		p.defaultMode = Open
 		p.mode = Open
+		modeName = "LockOpen"
 	case 6:
 		p.defaultMode = Secure
 		p.mode = Secure
+		modeName = "LockSecure"
 	case 7:
 		p.defaultMode = Locked
 		p.mode = Locked
+		modeName = "LockLocked"
 	default:
 		// 10..99: user line tag. Treat the remainder of the line as
 		// whatever the tag represents; for v1 that's just Open.
 	}
+	if p.logEnabled() {
+		p.logEvent("mode", nil, map[string]any{"n": n, "mode": modeName})
+	}
+}
+
+func (p *Protocol) logEnabled() bool {
+	return p.log != nil && p.log.Enabled()
+}
+
+func (p *Protocol) logEvent(event string, raw []byte, parsed map[string]any) {
+	e := protolog.Entry{Source: "mxp", Dir: "rx", Event: event, Parsed: parsed}
+	if len(raw) > 0 {
+		e.UTF8 = protolog.EncodeUTF8(raw)
+		e.Hex = protolog.EncodeHex(raw)
+	}
+	p.log.Log(e)
+}
+
+func (p *Protocol) logTx(event string, raw []byte, parsed map[string]any) {
+	e := protolog.Entry{Source: "mxp", Dir: "tx", Event: event, Parsed: parsed}
+	if len(raw) > 0 {
+		e.UTF8 = protolog.EncodeUTF8(raw)
+		e.Hex = protolog.EncodeHex(raw)
+	}
+	p.log.Log(e)
+}
+
+// findTagEnd returns the index of the '>' that terminates the MXP tag
+// starting at s[0] (which must be '<'), respecting single- and double-quoted
+// attribute values so nested tags inside element definitions like
+// `<!el x '<send …>'>` are not closed prematurely. Returns -1 if no
+// terminating '>' is present in s.
+func findTagEnd(s string) int {
+	var quote byte
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"':
+			quote = c
+		case '>':
+			return i
+		}
+	}
+	return -1
 }
 
 // parseModeEsc recognizes `ESC [ N z` (single-digit, 4 bytes) and

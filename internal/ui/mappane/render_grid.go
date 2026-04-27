@@ -42,7 +42,7 @@ func layerHeaderLines(v View) []string {
 
 // footerLine returns the bridge / dig hint footer (single padded row).
 //
-//   ↑ <name> | ↓ <name> | ▶ <name> | ◀ <name> | dig: <missing dirs>
+//	↑ <name> | ↓ <name> | ▶ <name> | ◀ <name> | dig: <missing dirs>
 //
 // Only directions that exist on the current room appear in the bridge
 // segment. The dig segment lists the subset of {u, d, in, out} that has no
@@ -187,16 +187,17 @@ func bodyLines(v View, rows int) []string {
 		}
 	}
 
-	// Draw links — one pass per direction. To avoid double-drawing, only
-	// emit a link when the source ID is alphabetically smaller than the
-	// destination ID. Connectivity rule: the destination must be in the
-	// layer AND its X/Y must match the expected offset.
-	for id := range layer {
+	// Draw links between rooms in the same layer. To avoid double-drawing,
+	// only emit a link when the source ID is alphabetically smaller than the
+	// destination ID. Non-step-adjacent cells are connected with a rasterised
+	// long line.
+	for _, id := range orderedLayerIDs(layer) {
 		r := v.Map.Rooms[id]
 		if r == nil {
 			continue
 		}
-		for d, otherID := range r.Exits {
+		for _, d := range sortedMappaneDirs(r.Exits) {
+			otherID := r.Exits[d]
 			if id >= otherID {
 				continue
 			}
@@ -207,14 +208,14 @@ func bodyLines(v View, rows int) []string {
 			if _, inLayer := layer[otherID]; !inLayer {
 				continue
 			}
-			dx, dy, ok := cardinalOffset(d)
-			if !ok {
+			if _, _, ok := cardinalOffset(d); !ok {
 				continue
 			}
-			if other.X != r.X+dx || other.Y != r.Y+dy {
-				continue
-			}
-			drawLink(grid, r.X-cx, cy-r.Y, dx, -dy, centerCol, centerRow, v.PanOffset)
+			sCol := centerCol + 2*(r.X-cx) - v.PanOffset.Col
+			sRow := centerRow + 2*(cy-r.Y) - v.PanOffset.Row
+			tCol := centerCol + 2*(other.X-cx) - v.PanOffset.Col
+			tRow := centerRow + 2*(cy-other.Y) - v.PanOffset.Row
+			drawLongLine(grid, sCol, sRow, tCol, tRow)
 		}
 	}
 
@@ -316,6 +317,15 @@ func cardinalOffset(d mapper.Direction) (int, int, bool) {
 	return 0, 0, false
 }
 
+func sortedMappaneDirs(exits map[mapper.Direction]string) []mapper.Direction {
+	dirs := make([]mapper.Direction, 0, len(exits))
+	for d := range exits {
+		dirs = append(dirs, d)
+	}
+	sort.Slice(dirs, func(i, j int) bool { return string(dirs[i]) < string(dirs[j]) })
+	return dirs
+}
+
 // drawLink writes the gutter glyph between (relX, relY) and (relX+dx, relY+dy)
 // in coord-space. screenDX/screenDY are the pre-flipped screen-space offsets
 // (Y inverted). The gutter glyph sits at the half-step.
@@ -335,6 +345,79 @@ func drawLink(g *grid, relX, relY, dx, screenDY int, centerCol, centerRow int, p
 	case dx > 0 && screenDY > 0, dx < 0 && screenDY < 0:
 		g.set(gCol, gRow, glyphDiagNWSE) // ╲
 	}
+}
+
+func drawLongLine(g *grid, sCol, sRow, tCol, tRow int) {
+	dx := tCol - sCol
+	dy := tRow - sRow
+	if dx == 0 && dy == 0 {
+		return
+	}
+	var glyph rune
+	switch {
+	case dx == 0:
+		glyph = glyphVLink
+	case dy == 0:
+		glyph = glyphHLink
+	case (dx > 0) == (dy < 0):
+		glyph = glyphDiagNESW
+	default:
+		glyph = glyphDiagNWSE
+	}
+
+	adx, ady := absMappaneInt(dx), absMappaneInt(dy)
+	sx, sy := signMappaneInt(dx), signMappaneInt(dy)
+	col, row := sCol, sRow
+	if adx >= ady {
+		err := 0
+		for i := 0; i < adx; i++ {
+			col += sx
+			err += ady
+			if 2*err >= adx {
+				row += sy
+				err -= adx
+			}
+			if col == tCol && row == tRow {
+				break
+			}
+			if g.get(col, row) == ' ' {
+				g.set(col, row, glyph)
+			}
+		}
+		return
+	}
+	err := 0
+	for i := 0; i < ady; i++ {
+		row += sy
+		err += adx
+		if 2*err >= ady {
+			col += sx
+			err -= ady
+		}
+		if col == tCol && row == tRow {
+			break
+		}
+		if g.get(col, row) == ' ' {
+			g.set(col, row, glyph)
+		}
+	}
+}
+
+func absMappaneInt(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+func signMappaneInt(n int) int {
+	if n < 0 {
+		return -1
+	}
+	if n > 0 {
+		return 1
+	}
+	return 0
 }
 
 // grid is a 2-D rune buffer that fills with spaces and renders to lines.

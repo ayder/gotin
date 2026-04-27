@@ -11,6 +11,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/ayder/gotin/internal/mudproto/protolog"
 )
 
 // EchoCallback is called when the server's echo state changes.
@@ -20,24 +22,25 @@ type EchoCallback func(localEcho bool)
 // Client wraps a TCP connection to a MUD server.
 type Client struct {
 	conn               net.Conn
-	reader             io.Reader          // swapped by protocols (e.g. MCCP2 zlib.Reader)
+	reader             io.Reader // swapped by protocols (e.g. MCCP2 zlib.Reader)
 	decoder            *Decoder
 	debug              bool
-	serverEcho         bool               // true when server is handling echo (client should hide input)
-	echoCallback       EchoCallback       // called when echo state changes
-	dataCallback       func(data string)  // called when new data arrives
-	disconnectCallback func(reason error) // called when ReadLoop exits; reason is nil for clean close
-	windowWidth        int                // terminal width for NAWS
-	windowHeight       int                // terminal height for NAWS
-	readDeadline       time.Duration      // per-read timeout; defaults to 5 minutes
-	pending            []byte             // pending bytes from incomplete IAC sequences
-	options            *optionTable       // per-option Q Method state (him/us)
-	protocols          map[byte]Protocol  // installed subprotocols keyed by option byte
-	protocolStatusCb   func(active []string) // fires when the negotiated-protocol set changes
+	serverEcho         bool                      // true when server is handling echo (client should hide input)
+	echoCallback       EchoCallback              // called when echo state changes
+	dataCallback       func(data string)         // called when new data arrives
+	disconnectCallback func(reason error)        // called when ReadLoop exits; reason is nil for clean close
+	windowWidth        int                       // terminal width for NAWS
+	windowHeight       int                       // terminal height for NAWS
+	readDeadline       time.Duration             // per-read timeout; defaults to 5 minutes
+	pending            []byte                    // pending bytes from incomplete IAC sequences
+	options            *optionTable              // per-option Q Method state (him/us)
+	protocols          map[byte]Protocol         // installed subprotocols keyed by option byte
+	protocolStatusCb   func(active []string)     // fires when the negotiated-protocol set changes
 	pendingSwap        func(io.Reader) io.Reader // set by ctx.SwapReader, consumed by ReadLoop
-	streamTail         []byte             // bytes after the triggering IAC SE to replay into the swapped reader
+	streamTail         []byte                    // bytes after the triggering IAC SE to replay into the swapped reader
 	debugLog           *log.Logger
 	debugFile          *os.File
+	protoLog           protolog.Logger
 }
 
 // SetDebug enables or disables debug logging.
@@ -66,6 +69,9 @@ func (c *Client) debugf(format string, args ...any) {
 func (c *Client) DebugLogf(format string, args ...any) {
 	c.debugf(format, args...)
 }
+
+// SetProtocolLogger installs a structured logger for raw rx chunks.
+func (c *Client) SetProtocolLogger(l protolog.Logger) { c.protoLog = l }
 
 // SetEchoCallback sets the callback function for echo state changes.
 func (c *Client) SetEchoCallback(callback EchoCallback) {
@@ -435,6 +441,32 @@ func (c *Client) ReadLoop() {
 
 		n, err := c.reader.Read(buffer)
 		if n > 0 {
+			// Log the raw rx chunk pre-IAC so Phase 2 can analyse telnet-level
+			// sequences as well as MUD payload. Truncated to 1 KiB so each JSON
+			// line stays well under PIPE_BUF (4 KiB on Linux/macOS) and append
+			// writes remain atomic when multiple log handles share gotin.log.
+			if c.protoLog != nil && c.protoLog.Enabled() {
+				raw := buffer[:n]
+				truncated := false
+				const maxLen = 1024
+				if len(raw) > maxLen {
+					raw = raw[:maxLen]
+					truncated = true
+				}
+				parsed := map[string]any{"len": n}
+				if truncated {
+					parsed["truncated"] = true
+				}
+				c.protoLog.Log(protolog.Entry{
+					Source: "raw",
+					Dir:    "rx",
+					Event:  "chunk",
+					UTF8:   protolog.EncodeUTF8(raw),
+					Hex:    protolog.EncodeHex(raw),
+					Parsed: parsed,
+				})
+			}
+
 			// Process IAC sequences and get negotiation responses
 			clean, responses := c.ProcessIAC(buffer[:n])
 

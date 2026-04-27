@@ -1,0 +1,7 @@
+<expire>   A paved street of interlocking stone slabs. Hundreds of seagulls
+patrol the streets of the Havens, squawking incessantly.
+The sky is black and the stars shine down brightly.
+The sky is brilliantly clear.
+    The only obvious exits are <x>east</x>, <x>northwest</x>, <x>west</x> and <x>southwest</x>.
+ <i30 "seagull 1">An injured seagull</i30><i30 "seagull 1"></i30>
+HP:70 EP:70 [WA] > 

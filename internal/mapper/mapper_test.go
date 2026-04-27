@@ -1,9 +1,12 @@
 package mapper
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -21,6 +24,537 @@ func mustCreate(t *testing.T, filename string) *Engine {
 		t.Fatalf("Create failed: %v", err)
 	}
 	return e
+}
+
+func TestDefaultMappingOptions(t *testing.T) {
+	opts := DefaultMappingOptions()
+	if !opts.Vnum {
+		t.Errorf("DefaultMappingOptions().Vnum = false, want true")
+	}
+	if opts.Hash {
+		t.Errorf("DefaultMappingOptions().Hash = true, want false")
+	}
+}
+
+func TestMappingOptionsJSON(t *testing.T) {
+	opts := MappingOptions{Vnum: true, Hash: false}
+	b, err := json.Marshal(opts)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if string(b) != `{"vnum":true,"hash":false}` {
+		t.Errorf("Marshal = %q, want %q", string(b), `{"vnum":true,"hash":false}`)
+	}
+	var got MappingOptions
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got != opts {
+		t.Errorf("round trip = %+v, want %+v", got, opts)
+	}
+}
+
+func TestEngineMappingOptionsRoundTrip(t *testing.T) {
+	e := NewEngine("")
+	if got := e.GetMappingOptions(); got != DefaultMappingOptions() {
+		t.Errorf("GetMappingOptions() = %+v, want %+v", got, DefaultMappingOptions())
+	}
+	e.SetMappingOptions(MappingOptions{Vnum: false, Hash: true})
+	if got := e.GetMappingOptions(); got != (MappingOptions{Vnum: false, Hash: true}) {
+		t.Errorf("after SetMappingOptions: got %+v", got)
+	}
+}
+
+func TestEngineMappingOptionsConcurrent(t *testing.T) {
+	e := NewEngine("")
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			e.SetMappingOptions(MappingOptions{Vnum: true, Hash: false})
+		}()
+		go func() {
+			defer wg.Done()
+			_ = e.GetMappingOptions()
+		}()
+	}
+	wg.Wait()
+}
+
+func TestNormaliseDescription(t *testing.T) {
+	in := "  A   plain.\n  Two  spaces.  "
+	want := "A plain.\nTwo spaces."
+	if got := normaliseDescription(in); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestComputeStructuralHash_Stable(t *testing.T) {
+	a := ComputeStructuralHash("A room.", []string{"n", "e"})
+	b := ComputeStructuralHash("A room.", []string{"e", "n"})
+	if a != b {
+		t.Errorf("hash should ignore exit order: %q vs %q", a, b)
+	}
+}
+
+func TestComputeStructuralHash_DifferentExitsDiffer(t *testing.T) {
+	a := ComputeStructuralHash("A room.", []string{"n"})
+	b := ComputeStructuralHash("A room.", []string{"s"})
+	if a == b {
+		t.Errorf("hash should differ on exit set")
+	}
+}
+
+func TestComputeStructuralHash_DistinctFromV1(t *testing.T) {
+	v2 := ComputeStructuralHash("A room.", []string{"n"})
+	v1 := ComputeRoomHash("A room.", []string{"n"})
+	if !strings.HasPrefix(v2, "v2:") {
+		t.Errorf("v2 hash missing prefix: %q", v2)
+	}
+	if v1 == v2 {
+		t.Errorf("v1 and v2 hashes must not collide")
+	}
+	if strings.HasPrefix(v1, "v2:") {
+		t.Errorf("v1 hash unexpectedly has v2 prefix: %q", v1)
+	}
+}
+
+func TestEngineMUDProfile_RoundTrip(t *testing.T) {
+	e := NewEngine("")
+	got := e.GetMUDProfile()
+	if got.Host != "t2tmud.org" {
+		t.Errorf("default profile host = %q, want t2tmud.org", got.Host)
+	}
+	custom := MUDProfile{Host: "example.org", BlockStartTag: "ROOM"}
+	e.SetMUDProfile(custom)
+	if e.GetMUDProfile().Host != "example.org" {
+		t.Errorf("SetMUDProfile did not persist host")
+	}
+}
+
+func TestEngineSentinels(t *testing.T) {
+	e := NewEngine("")
+	if e.HasMXPSeen() {
+		t.Errorf("default HasMXPSeen must be false")
+	}
+	if e.HasBlockStartSeen() {
+		t.Errorf("default HasBlockStartSeen must be false")
+	}
+	e.MarkMXPSeen()
+	if !e.HasMXPSeen() {
+		t.Errorf("MarkMXPSeen did not set sawMXP")
+	}
+	if e.HasBlockStartSeen() {
+		t.Errorf("MarkMXPSeen must NOT set sawBlockStart")
+	}
+	e.MarkBlockStartSeen()
+	if !e.HasBlockStartSeen() {
+		t.Errorf("MarkBlockStartSeen did not set sawBlockStart")
+	}
+	e.ResetBlockStart()
+	if e.HasMXPSeen() {
+		t.Errorf("ResetBlockStart did not clear sawMXP")
+	}
+	if e.HasBlockStartSeen() {
+		t.Errorf("ResetBlockStart did not clear sawBlockStart")
+	}
+}
+
+func TestProcessMovement_RequiresMXPAndBlockStartSentinels(t *testing.T) {
+	e := mustCreate(t, "")
+	e.SetMappingOptions(MappingOptions{Vnum: false, Hash: true})
+	e.StartAutoMapping()
+
+	processed, _, err := e.ProcessMovement("n")
+	if err != nil {
+		t.Fatalf("ProcessMovement: %v", err)
+	}
+	if processed {
+		t.Errorf("processed=true without sawMXP sentinel")
+	}
+	if e.HasPendingMovement() {
+		t.Errorf("pending state set without sawMXP")
+	}
+
+	e.MarkMXPSeen()
+	processed, _, err = e.ProcessMovement("n")
+	if err != nil {
+		t.Fatalf("ProcessMovement: %v", err)
+	}
+	if processed {
+		t.Errorf("processed=true without sawBlockStart sentinel")
+	}
+	if e.HasPendingMovement() {
+		t.Errorf("pending state set without sawBlockStart")
+	}
+}
+
+func TestHandleRoomBlock_NoOpWhenAutoMappingOff(t *testing.T) {
+	e := mustCreate(t, "")
+	processed, _, _, err := e.HandleRoomBlock(RoomBlock{Description: "x", Exits: []string{"n"}})
+	if processed || err != nil {
+		t.Errorf("processed=%v err=%v with auto-mapping off", processed, err)
+	}
+}
+
+func TestHandleRoomBlock_NoOpWhenSentinelMissing(t *testing.T) {
+	e := mustCreate(t, "")
+	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	processed, _, _, _ := e.HandleRoomBlock(RoomBlock{Description: "x", Exits: []string{"n"}})
+	if processed {
+		t.Errorf("processed=true without block-start sentinel")
+	}
+}
+
+func TestHandleRoomBlock_PendingMovementCreatesNewRoom(t *testing.T) {
+	e := mustCreate(t, "")
+	e.SetMappingOptions(MappingOptions{Vnum: false, Hash: true})
+	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
+	if _, _, err := e.ProcessMovement("n"); err != nil {
+		t.Fatalf("ProcessMovement: %v", err)
+	}
+	_, _, loop, err := e.HandleRoomBlock(RoomBlock{Description: "Plaza.", Exits: []string{"s"}})
+	if err != nil {
+		t.Fatalf("HandleRoomBlock: %v", err)
+	}
+	if loop {
+		t.Errorf("first arrival should not be a loop")
+	}
+	curr := e.GetCurrent()
+	if curr == nil || curr.Description == "" || !strings.HasPrefix(curr.DescriptionHash, "v2:") {
+		t.Errorf("current room not populated with v2 hash: %+v", curr)
+	}
+}
+
+func TestHandleRoomBlock_LoopDetectionByStructuralHash(t *testing.T) {
+	e := mustCreate(t, "")
+	e.SetMappingOptions(MappingOptions{Vnum: false, Hash: true})
+	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
+
+	_, _, _ = e.ProcessMovement("n")
+	_, _, _, _ = e.HandleRoomBlock(RoomBlock{Description: "Plaza.", Exits: []string{"s"}})
+	plazaID := e.data.CurrentRoom
+
+	_, _, _ = e.ProcessMovement("s")
+	_, _, _ = e.ProcessMovement("e")
+	_, _, _, _ = e.HandleRoomBlock(RoomBlock{Description: "Market.", Exits: []string{"w"}})
+
+	_, _, _ = e.ProcessMovement("n")
+	_, _, loop, _ := e.HandleRoomBlock(RoomBlock{Description: "Plaza.", Exits: []string{"s"}})
+	if !loop {
+		t.Errorf("expected loop-detected back to plaza")
+	}
+	if e.data.CurrentRoom != plazaID {
+		t.Errorf("current = %s, want plazaID %s", e.data.CurrentRoom, plazaID)
+	}
+}
+
+func TestPlaceRoomLocalRelaxation(t *testing.T) {
+	e := mustCreate(t, "")
+	startID := e.GetCurrent().ID
+
+	if err := e.Dig(North, "Northern Room"); err != nil {
+		t.Fatalf("Dig N: %v", err)
+	}
+	if err := e.Goto(startID); err != nil {
+		t.Fatalf("Goto start: %v", err)
+	}
+	if err := e.Dig(NorthEast, "NE Room"); err != nil {
+		t.Fatalf("Dig NE: %v", err)
+	}
+	ne := e.GetCurrent()
+	if ne.X != 1 || ne.Y != 1 {
+		t.Errorf("NE seed: got (%d,%d), want (1,1)", ne.X, ne.Y)
+	}
+
+	if err := e.Goto(startID); err != nil {
+		t.Fatalf("Goto start: %v", err)
+	}
+	if err := e.Dig(West, "West Room"); err != nil {
+		t.Fatalf("Dig W: %v", err)
+	}
+	westID := e.GetCurrent().ID
+	if err := e.Dig(NorthEast, "WestNE"); err != nil {
+		t.Fatalf("Dig NE from west: %v", err)
+	}
+	wne := e.GetCurrent()
+	if wne.X == 0 && wne.Y == 1 {
+		t.Errorf("placement collided with existing room at (0,1)")
+	}
+	if sw, ok := e.data.Rooms[wne.ID].Exits[SouthWest]; !ok || sw != westID {
+		t.Errorf("reverse SW link = %q, %v; want %q, true", sw, ok, westID)
+	}
+}
+
+func TestProximityGate(t *testing.T) {
+	e := mustCreate(t, "")
+	e.SetMappingOptions(MappingOptions{Vnum: false, Hash: false})
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
+	e.StartAutoMapping()
+	start := e.GetCurrent()
+	startID := start.ID
+	start.Name = "Start"
+	start.Description = "You stand at the meeting point of three old stone paths."
+
+	if _, _, err := e.ProcessMovement("s"); err != nil {
+		t.Fatalf("move s: %v", err)
+	}
+	if ok, _, _, err := e.HandleRoomBlock(RoomBlock{
+		Name:        "South Room",
+		Description: "A room south of the meeting point.",
+		Exits:       []string{"n", "nw"},
+	}); err != nil || !ok {
+		t.Fatalf("south block processed=%v err=%v", ok, err)
+	}
+
+	if _, _, err := e.ProcessMovement("nw"); err != nil {
+		t.Fatalf("move nw: %v", err)
+	}
+	if ok, _, _, err := e.HandleRoomBlock(RoomBlock{
+		Name:        "NW Room",
+		Description: "A room northwest of the southern room.",
+		Exits:       []string{"se", "e"},
+	}); err != nil || !ok {
+		t.Fatalf("nw block processed=%v err=%v", ok, err)
+	}
+
+	if _, _, err := e.ProcessMovement("e"); err != nil {
+		t.Fatalf("move e: %v", err)
+	}
+	_, _, looped, err := e.HandleRoomBlock(RoomBlock{
+		Name:        "Start",
+		Description: "You stand at the meeting point of three old stone paths.",
+		Exits:       []string{"s", "nw", "e"},
+	})
+	if err != nil {
+		t.Fatalf("closing block: %v", err)
+	}
+	if !looped {
+		t.Errorf("expected proximity loop detection")
+	}
+	if got := e.GetCurrent().ID; got != startID {
+		t.Errorf("current room = %q; want start %q", got, startID)
+	}
+	if n := len(e.data.Rooms); n != 3 {
+		t.Errorf("rooms = %d; want 3", n)
+	}
+}
+
+func TestProximityGateRejectsDifferentExits(t *testing.T) {
+	e := mustCreate(t, "")
+	e.SetMappingOptions(MappingOptions{Vnum: false, Hash: false})
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
+	e.StartAutoMapping()
+	startID := e.GetCurrent().ID
+
+	nearby := &Room{
+		ID:          "nearby",
+		Name:        "A misty forest",
+		Description: "A misty forest with thick trees and a quiet trail ahead.",
+		Exits:       map[Direction]string{North: "x", South: "y"},
+		X:           1,
+		Y:           1,
+	}
+	e.data.Rooms[nearby.ID] = nearby
+
+	if _, _, err := e.ProcessMovement("ne"); err != nil {
+		t.Fatalf("move ne: %v", err)
+	}
+	_, _, looped, err := e.HandleRoomBlock(RoomBlock{
+		Name:        "A misty forest",
+		Description: "A misty forest with thick trees and a quiet trail ahead.",
+		Exits:       []string{"e", "w"},
+	})
+	if err != nil {
+		t.Fatalf("ne block: %v", err)
+	}
+	if looped {
+		t.Errorf("proximity gate merged rooms with different exit sets")
+	}
+	if got := e.GetCurrent().ID; got == nearby.ID || got == startID {
+		t.Errorf("current room = %q; expected a freshly-created room", got)
+	}
+}
+
+func TestLoadVersionMigration(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.map")
+	raw := `{
+	  "rooms": {
+	    "A": {"id":"A","name":"A","exits":{"s":"B","e":"C"},"x":0,"y":0,"z":0},
+	    "B": {"id":"B","name":"B","exits":{"n":"A","nw":"C"},"x":0,"y":-1,"z":0},
+	    "C": {"id":"C","name":"C","exits":{"se":"B","w":"A"},"x":-1,"y":0,"z":0}
+	  },
+	  "current_room":"A"
+	}`
+	if err := os.WriteFile(path, []byte(raw), 0644); err != nil {
+		t.Fatalf("seed write: %v", err)
+	}
+	e := NewEngine("")
+	if err := e.Create(path); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if e.data.LayoutVersion != CurrentLayoutVersion {
+		t.Errorf("LayoutVersion = %d; want %d", e.data.LayoutVersion, CurrentLayoutVersion)
+	}
+	if err := e.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("readback: %v", err)
+	}
+	var got Map
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("readback json: %v", err)
+	}
+	if got.LayoutVersion != CurrentLayoutVersion {
+		t.Errorf("persisted LayoutVersion = %d; want %d", got.LayoutVersion, CurrentLayoutVersion)
+	}
+}
+
+func TestRefreshIdempotent(t *testing.T) {
+	e := mustCreate(t, "")
+	if err := e.Dig(North, "B"); err != nil {
+		t.Fatalf("dig N: %v", err)
+	}
+	if err := e.Dig(East, "C"); err != nil {
+		t.Fatalf("dig E: %v", err)
+	}
+	if err := e.Refresh(); err != nil {
+		t.Fatalf("first Refresh: %v", err)
+	}
+	snap1 := map[string][2]int{}
+	for id, r := range e.data.Rooms {
+		snap1[id] = [2]int{r.X, r.Y}
+	}
+	if err := e.Refresh(); err != nil {
+		t.Fatalf("second Refresh: %v", err)
+	}
+	for id, want := range snap1 {
+		r := e.data.Rooms[id]
+		if got := [2]int{r.X, r.Y}; got != want {
+			t.Errorf("room %s coords drifted: got %v, want %v", id, got, want)
+		}
+	}
+}
+
+// TestRefreshUndoableRestoresCoords asserts that Refresh pushes a pre-solve
+// snapshot onto the undo stack so /map undo restores hand-placed coords.
+func TestRefreshUndoableRestoresCoords(t *testing.T) {
+	e := NewEngine("")
+	if err := e.Create(""); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := e.Dig(North, "B"); err != nil {
+		t.Fatalf("dig N: %v", err)
+	}
+	if err := e.Dig(East, "C"); err != nil {
+		t.Fatalf("dig E: %v", err)
+	}
+
+	// Hand-place rooms at intentionally tangled coords the solver will move.
+	pre := map[string][2]int{}
+	for id, r := range e.data.Rooms {
+		r.X, r.Y = 7, 11 // collide all rooms; solver must rearrange
+		pre[id] = [2]int{r.X, r.Y}
+	}
+
+	if err := e.Refresh(); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	moved := false
+	for id, r := range e.data.Rooms {
+		if [2]int{r.X, r.Y} != pre[id] {
+			moved = true
+			break
+		}
+	}
+	if !moved {
+		t.Fatal("setup invalid: solver did not move any rooms")
+	}
+
+	if err := e.Undo(); err != nil {
+		t.Fatalf("Undo after Refresh: %v", err)
+	}
+	for id, want := range pre {
+		r := e.data.Rooms[id]
+		if got := [2]int{r.X, r.Y}; got != want {
+			t.Errorf("room %s coords after undo: got %v, want %v (Refresh did not snapshot)", id, got, want)
+		}
+	}
+}
+
+func TestRefreshCommandMatchesFreshLoad(t *testing.T) {
+	buildTangled := func() *Map {
+		return &Map{
+			Rooms: map[string]*Room{
+				"A": {ID: "A", Name: "A", Exits: map[Direction]string{South: "B", East: "C"}, X: 0, Y: 0},
+				"B": {ID: "B", Name: "B", Exits: map[Direction]string{North: "A", NorthWest: "C"}, X: 0, Y: -1},
+				"C": {ID: "C", Name: "C", Exits: map[Direction]string{SouthEast: "B", West: "A"}, X: -1, Y: 0},
+			},
+			CurrentRoom: "A",
+		}
+	}
+
+	e1 := NewEngine("")
+	e1.data = buildTangled()
+	e1.data.LayoutVersion = CurrentLayoutVersion
+	if err := e1.Refresh(); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fixture.map")
+	raw, err := json.Marshal(buildTangled())
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	if err := os.WriteFile(path, raw, 0644); err != nil {
+		t.Fatalf("seed write: %v", err)
+	}
+	e2 := NewEngine("")
+	if err := e2.Create(path); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	for _, id := range []string{"A", "B", "C"} {
+		a := e1.data.Rooms[id]
+		b := e2.data.Rooms[id]
+		if a.X != b.X || a.Y != b.Y {
+			t.Errorf("room %s: Refresh path = (%d,%d); Create migration path = (%d,%d)",
+				id, a.X, a.Y, b.X, b.Y)
+		}
+	}
+}
+
+func BenchmarkPlaceRoomDenseHub(b *testing.B) {
+	e := NewEngine("")
+	if err := e.Create(""); err != nil {
+		b.Fatalf("Create: %v", err)
+	}
+	dirs := []Direction{North, South, East, West, NorthEast, NorthWest, SouthEast, SouthWest}
+	startID := e.GetCurrent().ID
+	for i := 0; i < 20; i++ {
+		_ = e.Goto(startID)
+		d := dirs[i%len(dirs)]
+		_ = e.Dig(d, fmt.Sprintf("r%d", i))
+	}
+
+	fromRoom := e.data.Rooms[startID]
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _, _ = e.placeRoom(fromRoom, North)
+	}
 }
 
 // ─── Engine / Create ───────────────────────────────────────────────────────
@@ -461,12 +995,28 @@ func TestSetDescription(t *testing.T) {
 
 // ─── Auto-mapping State ────────────────────────────────────────────────────
 
+func TestIsCreated(t *testing.T) {
+	e := newEngine(t)
+	if e.IsCreated() {
+		t.Fatal("expected IsCreated false on fresh engine with empty path")
+	}
+	tmp := t.TempDir() + "/m.json"
+	if err := e.Create(tmp); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if !e.IsCreated() {
+		t.Fatal("expected IsCreated true after Create")
+	}
+}
+
 func TestAutoMappingState(t *testing.T) {
 	e := newEngine(t)
 	if e.IsAutoMapping() {
 		t.Fatal("expected auto-mapping off by default")
 	}
 	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
 	if !e.IsAutoMapping() {
 		t.Fatal("expected auto-mapping on after Start")
 	}
@@ -479,6 +1029,8 @@ func TestAutoMappingState(t *testing.T) {
 func TestHasPendingMovement(t *testing.T) {
 	e := mustCreate(t, "")
 	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
 	if e.HasPendingMovement() {
 		t.Fatal("expected no pending movement initially")
 	}
@@ -506,6 +1058,8 @@ func TestProcessMovementNotAutoMapping(t *testing.T) {
 func TestProcessMovementExistingExit(t *testing.T) {
 	e := mustCreate(t, "")
 	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
 	if err := e.Dig(North, "North Room"); err != nil {
 		t.Fatal(err)
 	}
@@ -530,6 +1084,8 @@ func TestProcessMovementExistingExit(t *testing.T) {
 func TestProcessMovementPending(t *testing.T) {
 	e := mustCreate(t, "")
 	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
 	processed, roomName, err := e.ProcessMovement("n")
 	if err != nil {
 		t.Fatalf("ProcessMovement failed: %v", err)
@@ -548,6 +1104,8 @@ func TestProcessMovementPending(t *testing.T) {
 func TestProcessMovementInvalidDirection(t *testing.T) {
 	e := mustCreate(t, "")
 	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
 	processed, _, _ := e.ProcessMovement("xyz")
 	if processed {
 		t.Fatal("expected no processing for invalid direction")
@@ -559,6 +1117,8 @@ func TestProcessMovementInvalidDirection(t *testing.T) {
 func TestProcessRoomDataNewRoom(t *testing.T) {
 	e := mustCreate(t, "")
 	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
 	_, _, _ = e.ProcessMovement("n")
 
 	text := "\tA sunny meadow\nObvious exits are north, south, east and west."
@@ -586,7 +1146,10 @@ func TestProcessRoomDataNewRoom(t *testing.T) {
 
 func TestProcessRoomDataLoopDetection(t *testing.T) {
 	e := mustCreate(t, "")
+	e.SetMappingOptions(MappingOptions{Vnum: true, Hash: true})
 	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
 	// Create a room north of start via auto-mapping
 	_, _, _ = e.ProcessMovement("n")
 	text := "\tA sunny meadow\nObvious exits are north, south, east and west."
@@ -621,9 +1184,97 @@ func TestProcessRoomDataLoopDetection(t *testing.T) {
 	}
 }
 
+func TestProcessRoomData_HashOff_DoesNotUseHashWithoutProximity(t *testing.T) {
+	e := mustCreate(t, "")
+	e.SetMappingOptions(MappingOptions{Vnum: false, Hash: false})
+	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
+
+	sample := "\tA grey room.\nObvious exits: south.\n"
+	differentExits := "\tA grey room.\nObvious exits: west.\n"
+	if _, _, err := e.ProcessMovement("n"); err != nil {
+		t.Fatalf("ProcessMovement n: %v", err)
+	}
+	if _, _, _, err := e.ProcessRoomData(sample); err != nil {
+		t.Fatalf("ProcessRoomData (1): %v", err)
+	}
+
+	if _, _, err := e.ProcessMovement("s"); err != nil {
+		t.Fatalf("ProcessMovement s: %v", err)
+	}
+	if _, _, err := e.ProcessMovement("e"); err != nil {
+		t.Fatalf("ProcessMovement e: %v", err)
+	}
+	_, _, loop, err := e.ProcessRoomData(differentExits)
+	if err != nil {
+		t.Fatalf("ProcessRoomData (2): %v", err)
+	}
+	if loop {
+		t.Errorf("loopDetected = true with Hash=false; want false")
+	}
+	if len(e.hashIndex) != 0 {
+		t.Errorf("hashIndex size = %d, want 0 with Hash=false", len(e.hashIndex))
+	}
+}
+
+func TestProcessRoomData_HashOn_PreservesLegacyBehavior(t *testing.T) {
+	e := mustCreate(t, "")
+	e.SetMappingOptions(MappingOptions{Vnum: false, Hash: true})
+	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
+
+	sample := "\tA grey room.\nObvious exits: south.\n"
+	if _, _, err := e.ProcessMovement("n"); err != nil {
+		t.Fatalf("ProcessMovement n: %v", err)
+	}
+	if _, _, _, err := e.ProcessRoomData(sample); err != nil {
+		t.Fatalf("ProcessRoomData (1): %v", err)
+	}
+
+	if _, _, err := e.ProcessMovement("s"); err != nil {
+		t.Fatalf("ProcessMovement s: %v", err)
+	}
+	if _, _, err := e.ProcessMovement("e"); err != nil {
+		t.Fatalf("ProcessMovement e: %v", err)
+	}
+	_, _, loop, err := e.ProcessRoomData(sample)
+	if err != nil {
+		t.Fatalf("ProcessRoomData (2): %v", err)
+	}
+	if !loop {
+		t.Errorf("loopDetected = false with Hash=true; want true")
+	}
+}
+
+func TestCreateRoom_HashOff_NoIndexEntry(t *testing.T) {
+	e := mustCreate(t, "")
+	e.SetMappingOptions(MappingOptions{Vnum: false, Hash: false})
+	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
+
+	if _, _, err := e.ProcessMovement("n"); err != nil {
+		t.Fatalf("ProcessMovement: %v", err)
+	}
+	if _, _, _, err := e.ProcessRoomData("\tA room.\nObvious exits: south.\n"); err != nil {
+		t.Fatalf("ProcessRoomData: %v", err)
+	}
+
+	if _, hasEmpty := e.hashIndex[""]; hasEmpty {
+		t.Errorf("hashIndex contains empty-string key; should not pollute index when Hash=false")
+	}
+	if len(e.hashIndex) != 0 {
+		t.Errorf("hashIndex size = %d; want 0 when Hash=false", len(e.hashIndex))
+	}
+}
+
 func TestProcessRoomDataNoPending(t *testing.T) {
 	e := mustCreate(t, "")
 	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
 	text := "\tA dark cave\nObvious exits are north and east."
 	processed, _, _, _ := e.ProcessRoomData(text)
 	if processed {
@@ -650,6 +1301,8 @@ func TestProcessRoomDataNotAutoMapping(t *testing.T) {
 func TestHandleGMCPRoomInfoNewRoom(t *testing.T) {
 	e := mustCreate(t, "")
 	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
 	_, _, _ = e.ProcessMovement("n")
 
 	room := GMCPRoom{
@@ -680,6 +1333,8 @@ func TestHandleGMCPRoomInfoNewRoom(t *testing.T) {
 func TestHandleGMCPRoomInfoVnumLoop(t *testing.T) {
 	e := mustCreate(t, "")
 	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
 	// Create a room with a known vnum via GMCP north of start
 	_, _, _ = e.ProcessMovement("n")
 	room := GMCPRoom{
@@ -720,7 +1375,10 @@ func TestHandleGMCPRoomInfoVnumLoop(t *testing.T) {
 
 func TestHandleGMCPRoomInfoHashLoop(t *testing.T) {
 	e := mustCreate(t, "")
+	e.SetMappingOptions(MappingOptions{Vnum: true, Hash: true})
 	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
 	// Create room north of start via GMCP with no vnum
 	_, _, _ = e.ProcessMovement("n")
 	room1 := GMCPRoom{
@@ -759,9 +1417,153 @@ func TestHandleGMCPRoomInfoHashLoop(t *testing.T) {
 	}
 }
 
+func TestHandleGMCPRoomInfo_VnumOff_DoesNotCollapse(t *testing.T) {
+	e := mustCreate(t, "")
+	e.SetMappingOptions(MappingOptions{Vnum: false, Hash: false})
+	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
+
+	if _, _, err := e.ProcessMovement("n"); err != nil {
+		t.Fatalf("ProcessMovement: %v", err)
+	}
+	if _, _, _, err := e.HandleGMCPRoomInfo(GMCPRoom{Vnum: "100", Name: "Plaza", Description: "A plaza.", Exits: []string{"s"}}); err != nil {
+		t.Fatalf("HandleGMCPRoomInfo: %v", err)
+	}
+	if _, _, err := e.ProcessMovement("s"); err != nil {
+		t.Fatalf("ProcessMovement: %v", err)
+	}
+	if _, _, err := e.ProcessMovement("e"); err != nil {
+		t.Fatalf("ProcessMovement: %v", err)
+	}
+	_, _, loop, err := e.HandleGMCPRoomInfo(GMCPRoom{Vnum: "100", Name: "Plaza", Description: "A plaza.", Exits: []string{"w"}})
+	if err != nil {
+		t.Fatalf("HandleGMCPRoomInfo (2nd): %v", err)
+	}
+	if loop {
+		t.Errorf("loopDetected = true with Vnum=false, want false")
+	}
+}
+
+func TestHandleGMCPRoomInfo_VnumOn_CollapsesByVnum(t *testing.T) {
+	e := mustCreate(t, "")
+	e.SetMappingOptions(MappingOptions{Vnum: true, Hash: false})
+	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
+
+	if _, _, err := e.ProcessMovement("n"); err != nil {
+		t.Fatalf("ProcessMovement: %v", err)
+	}
+	if _, _, _, err := e.HandleGMCPRoomInfo(GMCPRoom{Vnum: "100", Name: "Plaza", Description: "A plaza.", Exits: []string{"s"}}); err != nil {
+		t.Fatalf("HandleGMCPRoomInfo: %v", err)
+	}
+	if _, _, err := e.ProcessMovement("s"); err != nil {
+		t.Fatalf("ProcessMovement: %v", err)
+	}
+	if _, _, err := e.ProcessMovement("e"); err != nil {
+		t.Fatalf("ProcessMovement: %v", err)
+	}
+	_, _, loop, err := e.HandleGMCPRoomInfo(GMCPRoom{Vnum: "100", Name: "Plaza", Description: "A plaza.", Exits: []string{"w"}})
+	if err != nil {
+		t.Fatalf("HandleGMCPRoomInfo (2nd): %v", err)
+	}
+	if !loop {
+		t.Errorf("loopDetected = false with Vnum=true, want true")
+	}
+}
+
+func TestHandleGMCPRoomInfo_HashOff_DoesNotPopulateIndex(t *testing.T) {
+	e := mustCreate(t, "")
+	e.SetMappingOptions(MappingOptions{Vnum: false, Hash: false})
+	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
+
+	if _, _, err := e.ProcessMovement("n"); err != nil {
+		t.Fatalf("ProcessMovement: %v", err)
+	}
+	if _, _, _, err := e.HandleGMCPRoomInfo(GMCPRoom{Name: "X", Description: "desc", Exits: []string{"s"}}); err != nil {
+		t.Fatalf("HandleGMCPRoomInfo: %v", err)
+	}
+	if len(e.hashIndex) != 0 {
+		t.Errorf("hashIndex size = %d after Hash=false, want 0", len(e.hashIndex))
+	}
+}
+
+func TestHandleGMCPRoomInfo_EmptyName_UsesIncomingLatch(t *testing.T) {
+	e := mustCreate(t, "")
+	e.SetMappingOptions(MappingOptions{Vnum: true, Hash: false})
+	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
+
+	if _, _, err := e.ProcessMovement("n"); err != nil {
+		t.Fatalf("ProcessMovement: %v", err)
+	}
+	e.SetIncomingRoomName("MXP Plaza")
+
+	if _, _, _, err := e.HandleGMCPRoomInfo(GMCPRoom{Vnum: "100", Description: "desc", Exits: []string{"s"}}); err != nil {
+		t.Fatalf("HandleGMCPRoomInfo: %v", err)
+	}
+	if got := e.GetCurrent().Name; got != "MXP Plaza" {
+		t.Errorf("current room name = %q, want %q", got, "MXP Plaza")
+	}
+}
+
+func TestSetIncomingRoomName_PendingMovement_NamesNewRoom(t *testing.T) {
+	e := mustCreate(t, "")
+	e.SetMappingOptions(MappingOptions{Vnum: false, Hash: false})
+	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
+
+	if _, _, err := e.ProcessMovement("n"); err != nil {
+		t.Fatalf("ProcessMovement: %v", err)
+	}
+	e.SetIncomingRoomName("Town Plaza")
+
+	if _, _, _, err := e.ProcessRoomData("\tA plaza.\nObvious exits: south.\n"); err != nil {
+		t.Fatalf("ProcessRoomData: %v", err)
+	}
+	if got := e.GetCurrent().Name; got != "Town Plaza" {
+		t.Errorf("current room name = %q, want %q", got, "Town Plaza")
+	}
+}
+
+func TestSetIncomingRoomName_NoPending_RenamesCurrent(t *testing.T) {
+	e := mustCreate(t, "")
+	e.SetIncomingRoomName("Override")
+	if got := e.GetCurrent().Name; got != "Override" {
+		t.Errorf("current name = %q, want %q", got, "Override")
+	}
+}
+
+func TestSetIncomingRoomName_LastWriteWins(t *testing.T) {
+	e := mustCreate(t, "")
+	e.SetMappingOptions(MappingOptions{Vnum: false, Hash: false})
+	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
+
+	if _, _, err := e.ProcessMovement("n"); err != nil {
+		t.Fatalf("ProcessMovement: %v", err)
+	}
+	e.SetIncomingRoomName("First")
+	e.SetIncomingRoomName("Second")
+	if _, _, _, err := e.ProcessRoomData("\tdesc\nObvious exits: south.\n"); err != nil {
+		t.Fatalf("ProcessRoomData: %v", err)
+	}
+	if got := e.GetCurrent().Name; got != "Second" {
+		t.Errorf("name = %q, want %q", got, "Second")
+	}
+}
+
 func TestHandleGMCPRoomInfoNoPending(t *testing.T) {
 	e := mustCreate(t, "")
 	e.StartAutoMapping()
+	e.MarkMXPSeen()
+	e.MarkBlockStartSeen()
 	room := GMCPRoom{
 		Vnum:        "room-456",
 		Name:        "Update Room",

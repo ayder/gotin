@@ -21,14 +21,14 @@ func Render(v View) string {
 	return strings.Join(all, "\n")
 }
 
-// padRight right-pads s with spaces to width w. Does not truncate.
+// padRight right-pads s with spaces to width w. Truncates if longer.
 func padRight(s string, w int) string {
 	if w <= 0 {
 		return ""
 	}
 	r := []rune(s)
 	if len(r) >= w {
-		return s
+		return string(r[:w])
 	}
 	return s + strings.Repeat(" ", w-len(r))
 }

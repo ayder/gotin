@@ -85,6 +85,7 @@ type MapName struct{ Name string }
 type MapSearch struct{ Query string }
 type MapMermaid struct{ Scope string }
 type MapShow struct{}
+type MapRefresh struct{}
 type MapInfo struct{}
 type MapExit struct{}
 type MapOption struct {
@@ -93,22 +94,23 @@ type MapOption struct {
 	Enable   bool
 }
 
-func (*MapCreate) isCommand() {}
-func (*MapPaths) isCommand()  {}
-func (*MapDig) isCommand()    {}
-func (*MapUndo) isCommand()   {}
-func (*MapDelete) isCommand() {}
-func (*MapGoto) isCommand()   {}
-func (*MapLink) isCommand()   {}
-func (*MapStart) isCommand()  {}
-func (*MapStop) isCommand()   {}
-func (*MapName) isCommand()   {}
-func (*MapSearch) isCommand() {}
+func (*MapCreate) isCommand()  {}
+func (*MapPaths) isCommand()   {}
+func (*MapDig) isCommand()     {}
+func (*MapUndo) isCommand()    {}
+func (*MapDelete) isCommand()  {}
+func (*MapGoto) isCommand()    {}
+func (*MapLink) isCommand()    {}
+func (*MapStart) isCommand()   {}
+func (*MapStop) isCommand()    {}
+func (*MapName) isCommand()    {}
+func (*MapSearch) isCommand()  {}
 func (*MapMermaid) isCommand() {}
 func (*MapShow) isCommand()    {}
-func (*MapInfo) isCommand()   {}
-func (*MapExit) isCommand()   {}
-func (*MapOption) isCommand() {}
+func (*MapRefresh) isCommand() {}
+func (*MapInfo) isCommand()    {}
+func (*MapExit) isCommand()    {}
+func (*MapOption) isCommand()  {}
 
 // ─── UI ────────────────────────────────────────────────────────────────────
 

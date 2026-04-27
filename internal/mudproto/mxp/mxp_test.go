@@ -1,10 +1,14 @@
 package mxp
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/json"
 	"io"
 	"strings"
 	"testing"
 
+	"github.com/ayder/gotin/internal/mudproto/protolog"
 	"github.com/ayder/gotin/internal/network"
 )
 
@@ -18,11 +22,84 @@ func (c *captureCtx) Send(b []byte) error {
 	c.sent = append(c.sent, append([]byte(nil), b...))
 	return nil
 }
-func (c *captureCtx) SendSubneg(_ byte, _ []byte) error    { return nil }
+func (c *captureCtx) SendSubneg(_ byte, _ []byte) error      { return nil }
 func (c *captureCtx) SwapReader(_ func(io.Reader) io.Reader) {}
-func (c *captureCtx) Debug(_ string, _ ...any)              {}
-func (c *captureCtx) OptionActive(_ byte) bool              { return true }
-func (c *captureCtx) NotifyProtocolStatus()                 {}
+func (c *captureCtx) Debug(_ string, _ ...any)               {}
+func (c *captureCtx) OptionActive(_ byte) bool               { return true }
+func (c *captureCtx) NotifyProtocolStatus()                  {}
+
+type captureSink struct {
+	events []string
+}
+
+func (s *captureSink) OnText(t string)         { s.events = append(s.events, "T:"+t) }
+func (s *captureSink) OnTag(name, body string) { s.events = append(s.events, "G:"+name) }
+
+func TestSetSink_InterleavesTextAndTags(t *testing.T) {
+	p := New()
+	s := &captureSink{}
+	p.SetSink(s)
+
+	_ = p.Filter("hello<expire>world<x>east</x>!")
+
+	want := []string{"T:hello", "G:expire", "T:world", "G:x", "T:east", "G:/x", "T:!"}
+	if len(s.events) != len(want) {
+		t.Fatalf("got %v, want %v", s.events, want)
+	}
+	for i := range want {
+		if s.events[i] != want[i] {
+			t.Errorf("events[%d] = %q, want %q", i, s.events[i], want[i])
+		}
+	}
+}
+
+func TestSetSink_NilSafe(t *testing.T) {
+	p := New()
+	out := p.Filter("<x>east</x>")
+	if out != "east" {
+		t.Errorf("Filter(\"<x>east</x>\") = %q, want \"east\"", out)
+	}
+}
+
+func TestSetSink_FiresOnceAfterSplitCompletion(t *testing.T) {
+	p := New()
+	s := &captureSink{}
+	p.SetSink(s)
+
+	_ = p.Filter("<x")
+	for _, e := range s.events {
+		if strings.HasPrefix(e, "G:") {
+			t.Errorf("tag event fired on partial tag: %q", e)
+		}
+	}
+	_ = p.Filter(">east</x>")
+
+	var tagEvents []string
+	for _, e := range s.events {
+		if strings.HasPrefix(e, "G:") {
+			tagEvents = append(tagEvents, e[2:])
+		}
+	}
+	want := []string{"x", "/x"}
+	if len(tagEvents) != len(want) {
+		t.Fatalf("got %v, want %v", tagEvents, want)
+	}
+	for i := range want {
+		if tagEvents[i] != want[i] {
+			t.Errorf("tagEvents[%d] = %q, want %q", i, tagEvents[i], want[i])
+		}
+	}
+}
+
+func TestSentinelResetCallback_FiresOnDisable(t *testing.T) {
+	p := New()
+	called := false
+	p.SetSentinelResetCallback(func() { called = true })
+	p.OnDisable(&captureCtx{})
+	if !called {
+		t.Fatalf("reset callback did not fire")
+	}
+}
 
 // MXP must accept both server-initiated (IAC WILL MXP, e.g. t2tmud.org) and
 // client-initiated (IAC DO MXP) negotiations.
@@ -46,7 +123,7 @@ func TestFilter_StripsTags(t *testing.T) {
 		{"<B>bold</B>", "bold"},
 		{"before<SEND href=\"look\">look</SEND>after", "beforelookafter"},
 		{"<B>x</B> and <I>y</I>", "x and y"},
-		{"partial <B still open", "partial <B still open"}, // no closing '>', pass through
+		{"partial <B still open", "partial "}, // no closing '>', remainder buffered for next call
 	}
 	for _, tc := range cases {
 		got := p.Filter(tc.in)
@@ -251,22 +328,91 @@ func TestFilter_NoSendAfterDisable(t *testing.T) {
 	}
 }
 
-// Regression: a tag split across two calls must not be dropped.
+func TestFilter_LoggerEmitsExpectedEvents(t *testing.T) {
+	var buf bytes.Buffer
+	lg := protolog.NewJSONLinesLogger(&buf, func() bool { return true })
+	p := New()
+	p.SetLogger(lg)
+
+	in := "<VERSION><ROOMNAME>Hall</ROOMNAME>\x1b[1z<NOBR>\nAfter\n"
+	_ = p.Filter(in)
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	if len(lines) == 0 {
+		t.Fatalf("no log lines")
+	}
+
+	var sawChunk, sawTag, sawRoomName, sawMode bool
+	for _, line := range lines {
+		var e protolog.Entry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("malformed line %q: %v", line, err)
+		}
+		if e.Source != "mxp" {
+			t.Errorf("source = %q, want mxp", e.Source)
+		}
+		switch e.Event {
+		case "chunk":
+			sawChunk = true
+		case "tag":
+			sawTag = true
+		case "room_name":
+			sawRoomName = true
+			if got, _ := e.Parsed["name"].(string); got != "Hall" {
+				t.Errorf("room_name parsed.name = %v, want Hall", e.Parsed["name"])
+			}
+		case "mode":
+			sawMode = true
+		}
+	}
+	if !sawChunk || !sawTag || !sawRoomName || !sawMode {
+		t.Errorf("missing events: chunk=%v tag=%v room_name=%v mode=%v", sawChunk, sawTag, sawRoomName, sawMode)
+	}
+}
+
+func TestFilter_FullStreamLogIsParseableJSONLines(t *testing.T) {
+	var buf bytes.Buffer
+	lg := protolog.NewJSONLinesLogger(&buf, func() bool { return true })
+	p := New()
+	p.SetLogger(lg)
+	p.SetContext(&captureCtx{})
+
+	in := "<VERSION><ROOMNAME>Plaza</ROOMNAME>\x1b[1z<NOBR>\nDone\n"
+	_ = p.Filter(in)
+
+	rdr := bufio.NewScanner(&buf)
+	var n int
+	for rdr.Scan() {
+		var e protolog.Entry
+		if err := json.Unmarshal(rdr.Bytes(), &e); err != nil {
+			t.Errorf("line %d not valid JSON: %v (%q)", n, err, rdr.Text())
+		}
+		n++
+	}
+	if err := rdr.Err(); err != nil {
+		t.Fatalf("scan log: %v", err)
+	}
+	if n == 0 {
+		t.Fatalf("no lines written")
+	}
+}
+
+// Regression: a tag split across two calls must be buffered and stripped on
+// completion, not leaked as raw bytes. Real t2tmud sessions chunk MXP tags at
+// arbitrary byte boundaries (e.g. `<x>east\x1b[4z<` then `/x>...`), and any
+// leak produces visible `e</x>` artifacts in the UI.
 func TestFilter_PartialTagAcrossCalls(t *testing.T) {
 	p := New()
 	got1 := p.Filter("before<B")
 	got2 := p.Filter("old>after")
-	// First chunk has no closing '>', so "<B" should pass through.
-	if got1 != "before<B" {
-		t.Fatalf("partial tag chunk 1: got %q", got1)
+	// First call: only "before" is emitted; "<B" is buffered for next call.
+	if got1 != "before" {
+		t.Fatalf("partial tag chunk 1: got %q, want %q", got1, "before")
 	}
-	// Second chunk has the completion — but since Filter is stateless across
-	// tag boundaries, the second chunk sees "old>after" with no leading '<'
-	// and just passes through. This documents current v1 behavior: a full
-	// tag must fit within a single Filter call. Upstream buffering (e.g.
-	// linebuffer) is responsible for whole-line delivery.
-	if got2 != "old>after" {
-		t.Fatalf("partial tag chunk 2: got %q", got2)
+	// Second call: buffered "<B" + "old>" forms a complete <Bold> tag, gets
+	// stripped, and the trailing "after" is emitted.
+	if got2 != "after" {
+		t.Fatalf("partial tag chunk 2: got %q, want %q", got2, "after")
 	}
 }
 
@@ -343,5 +489,80 @@ func TestFilter_NoCallbackWhenRoomNameMissing(t *testing.T) {
 	}
 	if out != "unfinished" {
 		t.Fatalf("unexpected output: %q", out)
+	}
+}
+
+// TestFilter_StripsElementDefinitionWithNestedTag verifies that an MXP
+// element definition like `<!el x '<send …>'>` is consumed entirely, not
+// truncated at the inner '>' (which would leak the trailing `'>` to the UI).
+// Captured from a real t2tmud session.
+func TestFilter_StripsElementDefinitionWithNestedTag(t *testing.T) {
+	p := New()
+	in := `<!el x '<send href="&text;|l &text;" hint="go &text;|look &text;" expire="room_exits">'>HELLO`
+	out := p.Filter(in)
+	if out != "HELLO" {
+		t.Fatalf("element definition leaked: got %q, want %q", out, "HELLO")
+	}
+}
+
+func TestFilter_StripsBurstOfElementDefinitions(t *testing.T) {
+	p := New()
+	in := `<!el x '<send href="&text;">'>` +
+		`<!el xx '<send href="&text;">' att='dir'>` +
+		`<gauge hp maxhp caption='HP' color=red>` +
+		`<!en hp 70>` +
+		`AFTER`
+	out := p.Filter(in)
+	if out != "AFTER" {
+		t.Fatalf("burst of definitions leaked: got %q, want %q", out, "AFTER")
+	}
+}
+
+// TestFilter_SplitTagBufferedAcrossCalls verifies that a tag split at a
+// network-chunk boundary is buffered and stripped on the second call rather
+// than leaking '<' and the rest of the tag to the UI as separate fragments.
+// Captured from a real t2tmud session where chunks ended with `<x>east\x1b[4z<`
+// and the next chunk began with `/x>...`, producing visible `e</x>` artifacts.
+func TestFilter_SplitTagBufferedAcrossCalls(t *testing.T) {
+	p := New()
+	out1 := p.Filter("\x1b[1;37m\x1b[4z<x>east\x1b[4z<")
+	out2 := p.Filter("/x>\x1b[0m, ")
+	combined := out1 + out2
+	if strings.Contains(combined, "<") || strings.Contains(combined, ">") {
+		t.Fatalf("split tag leaked angle brackets: out1=%q out2=%q", out1, out2)
+	}
+	if !strings.Contains(combined, "east") {
+		t.Fatalf("exit name missing: out1=%q out2=%q", out1, out2)
+	}
+}
+
+func TestFilter_SplitElementDefinitionBufferedAcrossCalls(t *testing.T) {
+	p := New()
+	out1 := p.Filter(`<!el x '<send href="&text;|l &text;" expire="room`)
+	out2 := p.Filter(`_exits">'>HELLO`)
+	combined := out1 + out2
+	if combined != "HELLO" {
+		t.Fatalf("split element definition leaked: combined=%q", combined)
+	}
+}
+
+func TestFindTagEnd(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"<x>", 2},
+		{"<i30 \"seagull 1\">", 16},
+		{"<gauge hp maxhp caption='HP' color=red>", 38},
+		{`<!el x '<send href="x">'>`, 24},
+		{`<!el m '<send href="f|b" expire=ml>'>`, 36},
+		{"<incomplete", -1},
+		{`<unclosed-quote '`, -1},
+	}
+	for _, c := range cases {
+		got := findTagEnd(c.in)
+		if got != c.want {
+			t.Errorf("findTagEnd(%q) = %d, want %d", c.in, got, c.want)
+		}
 	}
 }

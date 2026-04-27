@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/ayder/gotin/internal/command"
 	"github.com/ayder/gotin/internal/mapper"
 	"github.com/ayder/gotin/internal/ui/mappane"
 )
@@ -172,9 +173,34 @@ func TestProtocolBadges_ShowsHint(t *testing.T) {
 	if !strings.Contains(out, "ctrl-h for help") {
 		t.Errorf("expected help hint in view, got:\n%s", out)
 	}
+	if !strings.Contains(out, "ctrl-r refresh map") {
+		t.Errorf("expected refresh hint in view, got:\n%s", out)
+	}
 }
 
-func TestPaneKeys_PanOnlyWhenInputEmpty(t *testing.T) {
+func TestCtrlR_TriggersRefresh(t *testing.T) {
+	m := freshModel(80, 24)
+	tm, _ := m.Update(MapPaneToggleMsg{})
+	m = tm.(Model)
+	if !m.mapPaneVisible {
+		t.Fatal("setup: pane must be visible")
+	}
+	ch := make(chan command.Command, 1)
+	m.LocalChan = ch
+
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlR})
+	m = tm.(Model)
+	select {
+	case got := <-ch:
+		if _, ok := got.(*command.MapRefresh); !ok {
+			t.Errorf("expected *command.MapRefresh, got %T", got)
+		}
+	default:
+		t.Errorf("expected ctrl-r to enqueue *command.MapRefresh")
+	}
+}
+
+func TestPaneKeys_ShiftArrowsPanRegardlessOfInputState(t *testing.T) {
 	m := freshModel(80, 24)
 	mm := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{
 		"a": {ID: "a", Exits: map[mapper.Direction]string{}},
@@ -183,26 +209,46 @@ func TestPaneKeys_PanOnlyWhenInputEmpty(t *testing.T) {
 	tm, _ := m.Update(MapPaneToggleMsg{})
 	m = tm.(Model)
 
-	// Pane visible, input empty: 'l' should pan +2 cols.
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	// Empty input: shift+right pans +2 cols.
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftRight})
 	m = tm.(Model)
 	if m.mapPanOffset.Col != 2 {
-		t.Errorf("pan col = %d, want 2", m.mapPanOffset.Col)
-	}
-	if m.textinput.Value() != "" {
-		t.Errorf("textinput must remain empty, got %q", m.textinput.Value())
+		t.Errorf("pan col = %d, want 2 after shift+right", m.mapPanOffset.Col)
 	}
 
-	// Now type some characters → pane keys must NOT pan.
+	// Even while typing, shift+arrows must work without disturbing input.
 	m.textinput.SetValue("look")
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftRight})
 	m = tm.(Model)
-	if m.mapPanOffset.Col != 2 {
-		t.Errorf("pan col changed while typing: got %d", m.mapPanOffset.Col)
+	if m.mapPanOffset.Col != 4 {
+		t.Errorf("pan col = %d, want 4 after shift+right while typing", m.mapPanOffset.Col)
+	}
+	if m.textinput.Value() != "look" {
+		t.Errorf("textinput must be untouched, got %q", m.textinput.Value())
 	}
 }
 
-func TestPaneKeys_RecenterOnC(t *testing.T) {
+func TestPaneKeys_PlainLetterDoesNotPan(t *testing.T) {
+	m := freshModel(80, 24)
+	mm := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{
+		"a": {ID: "a", Exits: map[mapper.Direction]string{}},
+	}}
+	m.SetMapEngineSnapshot(func() (*mapper.Map, string) { return mm, "a" })
+	tm, _ := m.Update(MapPaneToggleMsg{})
+	m = tm.(Model)
+
+	// 'l' must NOT pan — it should fall through to the textinput.
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	m = tm.(Model)
+	if m.mapPanOffset.Col != 0 {
+		t.Errorf("plain 'l' should not pan, got %d", m.mapPanOffset.Col)
+	}
+	if m.textinput.Value() != "l" {
+		t.Errorf("plain 'l' should reach textinput, got %q", m.textinput.Value())
+	}
+}
+
+func TestPaneKeys_F5Recenter(t *testing.T) {
 	m := freshModel(80, 24)
 	mm := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{
 		"a": {ID: "a", Exits: map[mapper.Direction]string{}},
@@ -212,10 +258,10 @@ func TestPaneKeys_RecenterOnC(t *testing.T) {
 	m = tm.(Model)
 	m.mapPanOffset = mappane.Point{Col: 4, Row: 4}
 
-	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	tm, _ = m.Update(tea.KeyMsg{Type: tea.KeyF5})
 	m = tm.(Model)
 	if m.mapPanOffset != (mappane.Point{}) {
-		t.Errorf("expected pan reset on c, got %+v", m.mapPanOffset)
+		t.Errorf("expected pan reset on F5, got %+v", m.mapPanOffset)
 	}
 }
 

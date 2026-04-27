@@ -1,0 +1,44 @@
+{
+  "aliases": {
+    "l": "look"
+  },
+  "triggers": [
+    {
+      "pattern": "^\\[gotin sample trigger\\]$",
+      "response": "look"
+    }
+  ],
+  "connections": {
+    "t2t": {
+      "host": "t2tmud.org",
+      "port": 9999,
+      "auto": true,
+      "protocols": {
+        "MCCP2": true,
+        "MXP": true
+      },
+      "mapping_options": {
+        "vnum": false,
+        "hash": true
+      }
+    }
+  },
+  "mapping_options": {
+    "vnum": false,
+    "hash": true
+  },
+  "mud_profiles": {
+    "t2tmud.org": {
+      "host": "t2tmud.org",
+      "block_start_tag": "expire",
+      "block_end_pattern": "\\r?\\n(?:\\u001b\\[[0-9;]*[A-Za-z])*HP:\\d+ EP:\\d+ \\[(?:\\u001b\\[[0-9;]*[A-Za-z])*\\w+(?:\\u001b\\[[0-9;]*[A-Za-z])*\\] > ",
+      "exit_tags": ["x", "xx", "t", "w", "ww", "l", "ll", "y", "yy", "z"],
+      "presence_tags": ["i30", "i9"],
+      "weather_patterns": [
+        "^The sky is .+\\.$",
+        "^A .+ sky .+\\.$"
+      ],
+      "door_state_pattern": "^The .+ (door|gate|portcullis) is (open|closed|locked|broken|sealed|barred)\\.$"
+    }
+  }
+}

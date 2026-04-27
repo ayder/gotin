@@ -601,7 +601,7 @@ func (h *Handler) cmdTrigger(args []string) ParseResult {
 
 // cmdSave handles the /save [filename] command.
 func (h *Handler) cmdSave(args []string) ParseResult {
-	filename := "gotin.json"
+	filename := "config.json"
 	if len(args) > 0 && args[0] != "" {
 		filename = args[0]
 	}
@@ -614,7 +614,7 @@ func (h *Handler) cmdSave(args []string) ParseResult {
 
 // cmdLoad handles the /load [filename] command.
 func (h *Handler) cmdLoad(args []string) ParseResult {
-	filename := "gotin.json"
+	filename := "config.json"
 	if len(args) > 0 && args[0] != "" {
 		filename = args[0]
 	}
@@ -629,7 +629,7 @@ func (h *Handler) cmdLoad(args []string) ParseResult {
 func (h *Handler) cmdMap(args []string) ParseResult {
 	if len(args) == 0 {
 		return ParseResult{
-			Response: "Usage: /map <subcommand> [args...]\nSubcommands: create, paths, dig, undo, delete, teleport, link, name, search, mermaid, show, info, option, start, stop, exit",
+			Response: "Usage: /map <subcommand> [args...]\nSubcommands: create, paths, dig, undo, delete, teleport, link, name, search, mermaid, show, refresh, info, option, start, stop, exit",
 		}
 	}
 
@@ -748,6 +748,9 @@ func (h *Handler) cmdMap(args []string) ParseResult {
 
 	case "show":
 		return ParseResult{Command: &command.MapShow{}, Response: "Toggling map pane..."}
+
+	case "refresh":
+		return ParseResult{Command: &command.MapRefresh{}, Response: "Refreshing map layout..."}
 
 	case "info":
 		return ParseResult{Command: &command.MapInfo{}}

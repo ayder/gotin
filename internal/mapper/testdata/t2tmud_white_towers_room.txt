@@ -1,0 +1,8 @@
+<expire>    Soaring hills lift this verdant heath skyward.  Despite their height,
+the summits are green, not stony.  In the rare places where the moorland
+plants fail, only a smooth chalky soil is visible beneath.
+The White Towers rise up to the east.
+The sky is black and the stars shine down brightly.
+The sky is brilliantly clear.
+    The only obvious exits are <x>east</x>, <x>north</x>, <x>west</x> and <x>south</x>.
+HP:70 EP:70 [WA] > 

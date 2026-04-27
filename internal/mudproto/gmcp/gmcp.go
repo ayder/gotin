@@ -7,6 +7,7 @@ package gmcp
 import (
 	"bytes"
 
+	"github.com/ayder/gotin/internal/mudproto/protolog"
 	"github.com/ayder/gotin/internal/network"
 )
 
@@ -18,8 +19,9 @@ type Callback func(pkg string, payload []byte)
 
 // Protocol is the GMCP Protocol implementation.
 type Protocol struct {
-	cb      Callback
-	dataRx  bool // set to true when first subnegotiation arrives
+	cb     Callback
+	dataRx bool // set to true when first subnegotiation arrives
+	log    protolog.Logger
 }
 
 // New returns a new GMCP Protocol. cb may be nil.
@@ -27,6 +29,9 @@ func New(cb Callback) *Protocol { return &Protocol{cb: cb} }
 
 // SetCallback replaces the GMCP callback at runtime.
 func (p *Protocol) SetCallback(cb Callback) { p.cb = cb }
+
+// SetLogger installs a structured logger; nil disables logging.
+func (p *Protocol) SetLogger(l protolog.Logger) { p.log = l }
 
 // IsDataActive implements network.DataActiveProtocol. GMCP only appears in
 // the active-protocol list after the server has sent at least one GMCP
@@ -62,6 +67,15 @@ func (p *Protocol) OnSubnegotiation(ctx network.Context, data []byte) error {
 	p.dataRx = true
 	if firstRx {
 		ctx.NotifyProtocolStatus()
+	}
+	if p.log != nil && p.log.Enabled() {
+		p.log.Log(protolog.Entry{
+			Source: "gmcp",
+			Dir:    "rx",
+			Event:  "chunk",
+			UTF8:   protolog.EncodeUTF8(data),
+			Hex:    protolog.EncodeHex(data),
+		})
 	}
 	pkg, payload := split(data)
 	ctx.Debug("GMCP: recv pkg=%q payload=%q", pkg, string(payload))

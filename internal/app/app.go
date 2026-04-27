@@ -48,6 +48,8 @@ type gotinData struct {
 	MUDProfiles    map[string]mapper.MUDProfile     `json:"mud_profiles,omitempty"`
 }
 
+const gotinDataFilename = "config.json"
+
 // protoFactories is the canonical name → factory map.
 var protoFactories = map[string]func() network.Protocol{
 	"GMCP":  func() network.Protocol { return gmcp.New(nil) },
@@ -204,9 +206,11 @@ func Run(ctx context.Context, opts Options) error {
 	// 8. Shared logic components
 	s.te = logic.NewTriggerEngine(s.sendToNet)
 	s.mapEngine = mapper.NewEngine("")
-	s.model.SetMapEngineSnapshot(func() (*mapper.Map, string) {
-		return s.mapEngine.Snapshot()
-	})
+	// The accessor must reach the program's value-copy of the model, so we
+	// send it as a tea.Msg via the UI pump after the program is running.
+	// Direct mutation of s.model would only update the local Session field.
+	mapSnap := func() (*mapper.Map, string) { return s.mapEngine.Snapshot() }
+	s.trySendUI(ui.SetMapEngineSnapshotMsg{Fn: mapSnap})
 	defaultMappingOptions := mapper.DefaultMappingOptions()
 	s.mappingOptionsTop = &defaultMappingOptions
 
@@ -224,7 +228,7 @@ func Run(ctx context.Context, opts Options) error {
 		s.te.AddTrigger(t.Pattern, t.Response)
 	}
 
-	// Auto-load gotin.json
+	// Auto-load project-level Gotin configuration.
 	s.loadGotinData()
 
 	// 9. Start goroutines
@@ -744,12 +748,12 @@ func (s *Session) dispatch(cmd command.Command) (mutates, quit bool) {
 	case *command.MapCreate:
 		filename := c.Filename
 		if filename == "" {
-			filename = "gotin.json"
+			filename = fmt.Sprintf("map_%s.map", time.Now().Format("20060102-150405"))
 		}
 		if err := s.mapEngine.Create(filename); err != nil {
 			s.program.Send(ui.StatusMsg{Message: fmt.Sprintf("Map Init Error: %v\n", err)})
 		} else {
-			s.program.Send(ui.StatusMsg{Message: "Map initialized.\n"})
+			s.program.Send(ui.StatusMsg{Message: fmt.Sprintf("Map initialized: %s\n", filename)})
 		}
 
 	case *command.MapPaths:
@@ -891,6 +895,14 @@ func (s *Session) dispatch(cmd command.Command) (mutates, quit bool) {
 		s.program.Send(ui.MapPaneToggleMsg{})
 		return false, false
 
+	case *command.MapRefresh:
+		if err := s.mapEngine.Refresh(); err != nil {
+			s.program.Send(ui.StatusMsg{Message: fmt.Sprintf("[Map] Refresh error: %v\n", err)})
+		} else {
+			s.program.Send(ui.StatusMsg{Message: "[Map] Layout refreshed.\n"})
+		}
+		return false, false
+
 	case *command.MapInfo:
 		r := s.mapEngine.GetCurrent()
 		if r != nil {
@@ -1019,16 +1031,16 @@ func (s *Session) loadGotinDataFile(filename string) {
 }
 
 func (s *Session) loadGotinData() {
-	if _, err := os.Stat("gotin.json"); err != nil {
+	if _, err := os.Stat(gotinDataFilename); err != nil {
 		return
 	}
-	data, err := os.ReadFile("gotin.json")
+	data, err := os.ReadFile(gotinDataFilename)
 	if err != nil {
 		return
 	}
 	var td gotinData
 	if err := json.Unmarshal(data, &td); err != nil {
-		log.Printf("Error parsing gotin.json: %v\n", err)
+		log.Printf("Error parsing %s: %v\n", gotinDataFilename, err)
 		return
 	}
 	s.model.ClearAliases()
@@ -1222,11 +1234,11 @@ func (s *Session) persistGotinData() {
 	if err != nil {
 		return
 	}
-	tmp := "gotin.json.tmp"
+	tmp := gotinDataFilename + ".tmp"
 	if err := os.WriteFile(tmp, fileData, 0644); err != nil {
 		return
 	}
-	_ = os.Rename(tmp, "gotin.json")
+	_ = os.Rename(tmp, gotinDataFilename)
 }
 
 func onOff(b bool) string {

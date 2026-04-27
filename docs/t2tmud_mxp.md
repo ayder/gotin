@@ -508,7 +508,7 @@ The sky is brilliantly clear.
 
 To re-capture against this MUD:
 
-1. `gotin.json`: ensure `connections.t2t.protocols.MXP = true`.
+1. `config.json`: ensure `connections.t2t.protocols.MXP = true`.
 2. Run with `-debug`.
 3. Open `gotin.log` and filter:
    - `grep -E '"source":"mxp","dir":"rx","event":"tag"'` — every parsed tag

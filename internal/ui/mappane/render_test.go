@@ -68,7 +68,8 @@ func TestRender_PaneTooShort(t *testing.T) {
 }
 
 func TestRender_PanOffsetMovesRoomsAndClipsCurrent(t *testing.T) {
-	a := makeRoom("a", 0, 0, 0); a.Name = "A"
+	a := makeRoom("a", 0, 0, 0)
+	a.Name = "A"
 	m := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{"a": a}}
 	w, h := 18, 9
 	got := Render(View{
@@ -84,8 +85,10 @@ func TestRender_PanOffsetMovesRoomsAndClipsCurrent(t *testing.T) {
 }
 
 func TestRender_TwoLayers_DefaultShowsCurrent(t *testing.T) {
-	a := makeRoom("a", 0, 0, 0); a.Name = "Square"
-	b := makeRoom("b", 0, 0, 1); b.Name = "Loft"
+	a := makeRoom("a", 0, 0, 0)
+	a.Name = "Square"
+	b := makeRoom("b", 0, 0, 1)
+	b.Name = "Loft"
 	a.Exits[mapper.Up] = "b"
 	b.Exits[mapper.Down] = "a"
 	m := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{"a": a, "b": b}}
@@ -106,8 +109,10 @@ func TestRender_TwoLayers_DefaultShowsCurrent(t *testing.T) {
 }
 
 func TestRender_TwoLayers_LayerKeyOverridesAndAddsViewingRemote(t *testing.T) {
-	a := makeRoom("a", 0, 0, 0); a.Name = "Square"
-	b := makeRoom("b", 0, 0, 1); b.Name = "Loft"
+	a := makeRoom("a", 0, 0, 0)
+	a.Name = "Square"
+	b := makeRoom("b", 0, 0, 1)
+	b.Name = "Loft"
 	a.Exits[mapper.Up] = "b"
 	b.Exits[mapper.Down] = "a"
 	m := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{"a": a, "b": b}}
@@ -124,7 +129,8 @@ func TestRender_TwoLayers_LayerKeyOverridesAndAddsViewingRemote(t *testing.T) {
 }
 
 func TestFooter_NoBridges(t *testing.T) {
-	a := makeRoom("a", 0, 0, 0); a.Name = "A"
+	a := makeRoom("a", 0, 0, 0)
+	a.Name = "A"
 	m := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{"a": a}}
 	got := Render(View{PaneWidth: 30, PaneHeight: 6, Map: m, CurrentID: "a"})
 	lines := strings.Split(got, "\n")
@@ -134,8 +140,10 @@ func TestFooter_NoBridges(t *testing.T) {
 }
 
 func TestFooter_ExistingBridgesAndPartialDigHints(t *testing.T) {
-	a := makeRoom("a", 0, 0, 0); a.Name = "A"
-	b := makeRoom("b", 0, 0, 1); b.Name = "Stairs"
+	a := makeRoom("a", 0, 0, 0)
+	a.Name = "A"
+	b := makeRoom("b", 0, 0, 1)
+	b.Name = "Stairs"
 	a.Exits[mapper.Up] = "b"
 	b.Exits[mapper.Down] = "a"
 	m := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{"a": a, "b": b}}
@@ -169,9 +177,12 @@ func TestFooter_AllFourBridgesNoDigHint(t *testing.T) {
 }
 
 func TestRender_BridgeOverlay_CardinalWinsOverArrow(t *testing.T) {
-	a := makeRoom("a", 0, 0, 0); a.Name = "A"
-	b := makeRoom("b", 0, 1, 0); b.Name = "B"
-	c := makeRoom("c", 0, 0, 1); c.Name = "C"
+	a := makeRoom("a", 0, 0, 0)
+	a.Name = "A"
+	b := makeRoom("b", 0, 1, 0)
+	b.Name = "B"
+	c := makeRoom("c", 0, 0, 1)
+	c.Name = "C"
 	a.Exits[mapper.North] = "b"
 	b.Exits[mapper.South] = "a"
 	a.Exits[mapper.Up] = "c"
@@ -225,8 +236,10 @@ func TestRender_CoordOverlapNudgesAndFlags(t *testing.T) {
 	// its east neighbour even though the coordinates do not match — that
 	// link is omitted by the connectivity rule, but LayerOf still treats
 	// them as connected because BFS trusts the exit map.
-	a := makeRoom("a", 0, 0, 0); a.Name = "A"
-	b := makeRoom("b", 0, 0, 0); b.Name = "B"
+	a := makeRoom("a", 0, 0, 0)
+	a.Name = "A"
+	b := makeRoom("b", 0, 0, 0)
+	b.Name = "B"
 	a.Exits[mapper.West] = "b"
 	b.Exits[mapper.East] = "a"
 	m := &mapper.Map{
@@ -242,8 +255,9 @@ func TestRender_CoordOverlapNudgesAndFlags(t *testing.T) {
 	}
 }
 
-func TestRender_OmitsEdgeWhenCoordsDoNotMatch(t *testing.T) {
-	// A says exits[E]=B, but B's X is 5 (not 1). The link must NOT be drawn.
+func TestRender_DrawsEdgeWhenCoordsDoNotMatch(t *testing.T) {
+	// A says exits[E]=B, and B's X is 5. Settled-grid layouts may produce
+	// non-step-adjacent cells, so the link should still be drawn.
 	a := makeRoom("a", 0, 0, 0)
 	b := makeRoom("b", 5, 0, 0)
 	a.Exits[mapper.East] = "b"
@@ -253,8 +267,30 @@ func TestRender_OmitsEdgeWhenCoordsDoNotMatch(t *testing.T) {
 		Rooms:       map[string]*mapper.Room{"a": a, "b": b},
 	}
 	got := Render(View{PaneWidth: 30, PaneHeight: 9, Map: m, CurrentID: "a"})
-	if strings.ContainsRune(got, glyphHLink) {
-		t.Errorf("expected NO ─ when destination coord does not match offset:\n%s", got)
+	if !strings.ContainsRune(got, glyphHLink) {
+		t.Errorf("expected ─ when destination coord does not match offset:\n%s", got)
+	}
+}
+
+func TestLongDiagonalEdge(t *testing.T) {
+	m := &mapper.Map{
+		Rooms: map[string]*mapper.Room{
+			"A": {ID: "A", Name: "A", X: 0, Y: 0, Exits: map[mapper.Direction]string{mapper.South: "B", mapper.East: "C"}},
+			"B": {ID: "B", Name: "B", X: 0, Y: -2, Exits: map[mapper.Direction]string{mapper.North: "A", mapper.NorthEast: "C"}},
+			"C": {ID: "C", Name: "C", X: 2, Y: 0, Exits: map[mapper.Direction]string{mapper.West: "A", mapper.SouthWest: "B"}},
+		},
+		CurrentRoom: "A",
+	}
+	lines := bodyLines(View{Map: m, CurrentID: "A", PaneWidth: 40}, 20)
+	out := strings.Join(lines, "\n")
+	if !strings.ContainsRune(out, glyphVLink) {
+		t.Errorf("missing vertical link glyph (A-B):\n%s", out)
+	}
+	if !strings.ContainsRune(out, glyphHLink) {
+		t.Errorf("missing horizontal link glyph (A-C):\n%s", out)
+	}
+	if !strings.ContainsRune(out, glyphDiagNESW) && !strings.ContainsRune(out, glyphDiagNWSE) {
+		t.Errorf("missing diagonal link glyph (B-C):\n%s", out)
 	}
 }
 
@@ -277,9 +313,15 @@ func TestRender_MixedGridAllEightNeighbours(t *testing.T) {
 	// 3x3 grid centred on "c" with all eight neighbours.
 	rooms := map[string]*mapper.Room{}
 	put := func(id string, x, y int) { rooms[id] = makeRoom(id, x, y, 0) }
-	put("nw", -1, 1); put("n", 0, 1); put("ne", 1, 1)
-	put("w", -1, 0); put("c", 0, 0); put("e", 1, 0)
-	put("sw", -1, -1); put("s", 0, -1); put("se", 1, -1)
+	put("nw", -1, 1)
+	put("n", 0, 1)
+	put("ne", 1, 1)
+	put("w", -1, 0)
+	put("c", 0, 0)
+	put("e", 1, 0)
+	put("sw", -1, -1)
+	put("s", 0, -1)
+	put("se", 1, -1)
 	c := rooms["c"]
 	c.Exits = map[mapper.Direction]string{
 		mapper.North: "n", mapper.South: "s", mapper.East: "e", mapper.West: "w",

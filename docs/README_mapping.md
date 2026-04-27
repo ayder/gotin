@@ -25,7 +25,8 @@ Each room is stored as an object containing:
 - **`Description`**: A snippet of the room's description used for identification.
 - **`DescriptionHash`**: A SHA-256 hash of the room's description and known exits. This is the core of the auto-mapping system, allowing the client to recognize when you've walked in a circle or returned to a previously visited room.
 - **`Exits`**: A map linking standard directions (n, s, e, w, u, d, etc.) to the `ID`s of other rooms.
-- **`X, Y, Z`**: Logical coordinates. While the map is fundamentally a node graph, these coordinates help in standardizing the map layout.
+- **`X, Y, Z`**: Logical settled-grid coordinates. The mapper stores integer cells; the terminal renderer applies its own screen-cell multiplier.
+- **`LayoutVersion`**: A small integer on the `Map` that tracks which layout solver produced the stored coordinates. Loading a stale map re-runs the solver once and writes the current version on the next save.
 
 ### The JSON File
 When you run `/map exit` or the game triggers an auto-save, the engine serializes the `Map` object (which contains the `Rooms` dictionary and the `CurrentRoom` ID) to a JSON file (e.g., `map.json`).
@@ -89,9 +90,17 @@ If you prefer building the map node-by-node, or need to fix auto-mapping errors:
 
 - `/map show`
   Toggles the live, terminal-native map pane to the right of the MUD output.
-  Cell pitch (2,2). Layer auto-switches on up/down/in/out. Pan with h/j/k/l
-  while the input line is empty; `c` recenters; `[`/`]` step layers; `Esc`
-  closes.
+  Cell pitch (2,2). Layer auto-switches on up/down/in/out.
+  Keybindings (active while pane is visible):
+  - `shift+←/→/↑/↓` — pan (works even while typing)
+  - `F5` — recenter and clear remote-layer view
+  - `F3` / `F4` — previous / next layer
+  - `ctrl-r` — refresh layout
+  - `Esc` — close pane (only when input is empty)
+  - `/map show` or `ctrl+b` — toggle pane on/off
+
+- `/map refresh`
+  Re-runs the settled-grid layout solver across the map and replaces stored coordinates with settled positions. Use it when a MUD's topology is not strictly Euclidean, such as closing triangles like `s -> nw -> e`. Also bound to `ctrl-r` while the map pane is visible.
 
 - `/map mermaid [radius|all]`
   Generates the Mermaid graph.
@@ -109,6 +118,8 @@ If you prefer building the map node-by-node, or need to fix auto-mapping errors:
 ### Smart Auto-Mapping
 
 Auto-mapping relies on reading the MUD's text output to intelligently build the map as you walk.
+
+The mapper runs duplicate-detection gates in order: vnum match when available, structural-hash match when enabled, then an always-on proximity gate. The proximity gate looks near the seeded destination cell and links to the closest existing room when the reverse exit is safe, the existing room's known exits are a subset of the incoming exits, and the descriptions match by hash or long shared prefix. This keeps non-Euclidean paths from creating duplicate rooms without adding another user-facing option.
 
 - `/map start [room_id_or_name]`
   Engages auto-mapping mode. As you type directions (n, s, e, w) and the MUD sends back descriptions, the engine will automatically hash the descriptions and link rooms together.
