@@ -12,6 +12,9 @@ type MapPaneToggleMsg struct{}
 // back to the (possibly new) current room.
 type MapPaneRecenterMsg struct{}
 
+// MapPaneRefreshMsg retries layout without changing discovery coordinates or undo.
+type MapPaneRefreshMsg struct{}
+
 // SetMapEngineSnapshotMsg installs a snapshot accessor on the model copy
 // held by the running tea.Program. This must travel via tea.Program.Send
 // rather than by calling Model.SetMapEngineSnapshot directly, because the

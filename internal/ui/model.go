@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"time"
@@ -94,6 +95,16 @@ type Model struct {
 	mapPaneLayerKey   string
 	mapPaneLastCurrID string
 	mapEngineSnapshot func() (*mapper.Map, string)
+	mapAdapter        *mappane.Adapter
+	mapSnapshot       *mapper.Map
+	mapCurrent        string
+	mapFrame          *mappane.Frame
+	mapDrawKey        [32]byte
+	mapDrawHasKey     bool
+	mapDrawPending    bool
+	mapDrawError      error
+	mapDrawGeneration uint64
+	mapDrawCancel     context.CancelFunc
 
 	// Channels for command routing
 	SendChan  chan<- string          // Channel to send commands to server
@@ -128,8 +139,8 @@ func New(sendChan chan<- string, localChan chan<- command.Command) Model {
 }
 
 // SetMapEngineSnapshot wires a snapshot accessor into the model. The
-// accessor must be safe for concurrent use; it is invoked from the model's
-// View method and also from MapPaneRecenterMsg handling.
+// accessor must be safe for concurrent use; Update uses it to prepare immutable
+// drawing requests. View only crops the most recently completed drawing.
 func (m *Model) SetMapEngineSnapshot(fn func() (*mapper.Map, string)) {
 	m.mapEngineSnapshot = fn
 }
@@ -162,7 +173,7 @@ func (m Model) Init() tea.Cmd {
 }
 
 // Update handles incoming messages and updates the model state.
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var (
 		cmd  tea.Cmd
 		cmds []tea.Cmd
@@ -752,7 +763,7 @@ func (mm Model) composeMapSplit(leftView string) string {
 	if mm.mapEngineSnapshot == nil {
 		return leftView
 	}
-	snap, currID := mm.mapEngineSnapshot()
+	snap, currID := mm.mapSnapshot, mm.mapCurrent
 	paneW := mm.mapPaneWidth
 	paneH := mm.height - InputHeight
 	pane := mappane.Render(mappane.View{
@@ -762,6 +773,9 @@ func (mm Model) composeMapSplit(leftView string) string {
 		CurrentID:  currID,
 		PanOffset:  mm.mapPanOffset,
 		LayerKey:   mm.mapPaneLayerKey,
+		Frame:      mm.mapFrame,
+		Pending:    mm.mapDrawPending,
+		Error:      mm.mapDrawError,
 	})
 
 	// Split leftView into the viewport block (top, paneH lines) and the rest.

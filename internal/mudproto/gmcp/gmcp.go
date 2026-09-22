@@ -9,6 +9,7 @@ import (
 
 	"github.com/ayder/gotin/internal/mudproto/protolog"
 	"github.com/ayder/gotin/internal/network"
+	"github.com/ayder/gotin/internal/version"
 )
 
 // Callback receives parsed GMCP messages.
@@ -46,7 +47,7 @@ func (*Protocol) Kind() network.Kind { return network.KindHim }
 func (*Protocol) OnEnable(ctx network.Context) error {
 	ctx.Debug("GMCP: enabled, sending Core.Hello + Core.Supports")
 	// Most GMCP servers require a Core.Hello handshake before they send data.
-	hello := []byte(`Core.Hello {"client":"gotin","version":"1.0"}`)
+	hello := []byte(`Core.Hello {"client":"gotin","version":"` + version.Version + `"}`)
 	if err := ctx.SendSubneg(network.GMCP, hello); err != nil {
 		ctx.Debug("GMCP: Core.Hello send error: %v", err)
 	}

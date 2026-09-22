@@ -1,6 +1,9 @@
 package mappane
 
-import "strings"
+import (
+	"github.com/charmbracelet/x/ansi"
+	"strings"
+)
 
 // Render returns a styled string sized exactly View.PaneWidth × View.PaneHeight.
 // Pure: same input → same output. No goroutines, no I/O.
@@ -26,9 +29,6 @@ func padRight(s string, w int) string {
 	if w <= 0 {
 		return ""
 	}
-	r := []rune(s)
-	if len(r) >= w {
-		return string(r[:w])
-	}
-	return s + strings.Repeat(" ", w-len(r))
+	s = ansi.Truncate(s, w, "")
+	return s + strings.Repeat(" ", max(0, w-ansi.StringWidth(s)))
 }

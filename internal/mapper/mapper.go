@@ -447,10 +447,8 @@ func (e *Engine) Create(filename string) error {
 			}
 			// Rebuild hash index from loaded rooms
 			e.rebuildHashIndex()
-			if e.data.LayoutVersion < CurrentLayoutVersion {
-				NewSolver(SolverConfig{}).Solve(e.data)
-				e.data.LayoutVersion = CurrentLayoutVersion
-			}
+			// Coordinates belong to discovery/proximity matching. Display layout
+			// is derived from snapshots by nelib and never migrates these cells.
 			return nil
 		} else if !os.IsNotExist(err) {
 			return err
@@ -705,18 +703,6 @@ func (e *Engine) Save() error {
 		return err
 	}
 	return os.WriteFile(e.path, data, 0644)
-}
-
-// Refresh re-runs the settled-grid layout solver across all Z-layers. The
-// pre-refresh map state is pushed onto the undo stack so /map undo can
-// recover hand-placed coordinates that were displaced by the solver.
-func (e *Engine) Refresh() error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.saveState()
-	NewSolver(SolverConfig{}).Solve(e.data)
-	e.data.LayoutVersion = CurrentLayoutVersion
-	return nil
 }
 
 func (e *Engine) GetCurrent() *Room {

@@ -14,7 +14,9 @@
 ## Installation
 
 ### Prerequisites
--   Go 1.21 or higher.
+-   Go 1.25.5 or higher.
+-   Go downloads the pinned [`nelib`](https://github.com/ayder/nelib) module
+    automatically; no sibling checkout is required.
 
 ### Build from Source
 ```bash
@@ -44,6 +46,7 @@ You can also connect directly via command-line flags:
 -   `-host`: The MUD server hostname.
 -   `-port`: The MUD server port.
 -   `-debug`: Enable debug logging for Telnet negotiations (useful for developers).
+-   `-version`: Print the client version and exit.
 
 ## Commands
 
@@ -79,7 +82,17 @@ Example:
 ```
 
 ### The Mapper
-Gotin features a built-in mapping system to track your exploration.
+Gotin owns room discovery, identity, metadata, JSON storage, and undo. The
+terminal map uses `nelib` for validated layout and drawing. Display labels are
+session-local numbers; `/map` commands continue to use stored room IDs/names.
+
+Drawings run in the background with bounded solver time and are reused for
+panning/resizing. One-way compass passages have arrowheads. Up/down indicators
+appear inside room labels; `in/out` destinations appear in the footer. F3/F4
+browse layers, F5 recenters, and Shift+arrows pan. A layout error leaves all
+recorded rooms and movement intact. Correct conflicting exits or use Ctrl-r to
+retry a timeout. Layouts require straight, non-crossing compass paths; some MUD
+topologies cannot satisfy those constraints.
 
 #### Creation & Loading
 | Command | Description |
@@ -117,7 +130,8 @@ When a matching hash is found, the mapper links to the existing room instead of 
 | Command | Description |
 | :--- | :--- |
 | `/map mermaid [radius\|all]` | Render Mermaid graph of nearby rooms |
-| `/map show` | Toggle a side-by-side terminal map pane on the right of the MUD output |
+| `/map show` | Toggle the nelib terminal map pane |
+| `/map refresh` | Retry the displayed layout without changing stored coordinates or undo |
 | `/map info` | Show current room details (ID, name, exits, coordinates) |
 | `/map search <query>` | Find rooms by name or description |
 
