@@ -384,156 +384,34 @@ func TestProximityGateRejectsDifferentExits(t *testing.T) {
 	}
 }
 
-func TestLoadVersionMigration(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "test.map")
-	raw := `{
-	  "rooms": {
-	    "A": {"id":"A","name":"A","exits":{"s":"B","e":"C"},"x":0,"y":0,"z":0},
-	    "B": {"id":"B","name":"B","exits":{"n":"A","nw":"C"},"x":0,"y":-1,"z":0},
-	    "C": {"id":"C","name":"C","exits":{"se":"B","w":"A"},"x":-1,"y":0,"z":0}
-	  },
-	  "current_room":"A"
-	}`
+func TestLoadPreservesDiscoveryCoordinates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.map")
+	raw := `{"rooms":{"A":{"id":"A","name":"A","exits":{"e":"B"},"x":7,"y":11,"z":0},"B":{"id":"B","name":"B","exits":{"w":"A"},"x":7,"y":11,"z":0}},"current_room":"A"}`
 	if err := os.WriteFile(path, []byte(raw), 0644); err != nil {
-		t.Fatalf("seed write: %v", err)
+		t.Fatal(err)
 	}
 	e := NewEngine("")
 	if err := e.Create(path); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if e.data.LayoutVersion != CurrentLayoutVersion {
-		t.Errorf("LayoutVersion = %d; want %d", e.data.LayoutVersion, CurrentLayoutVersion)
+		t.Fatal(err)
 	}
 	if err := e.Save(); err != nil {
-		t.Fatalf("Save: %v", err)
+		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("readback: %v", err)
+		t.Fatal(err)
 	}
 	var got Map
 	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("readback json: %v", err)
+		t.Fatal(err)
 	}
-	if got.LayoutVersion != CurrentLayoutVersion {
-		t.Errorf("persisted LayoutVersion = %d; want %d", got.LayoutVersion, CurrentLayoutVersion)
-	}
-}
-
-func TestRefreshIdempotent(t *testing.T) {
-	e := mustCreate(t, "")
-	if err := e.Dig(North, "B"); err != nil {
-		t.Fatalf("dig N: %v", err)
-	}
-	if err := e.Dig(East, "C"); err != nil {
-		t.Fatalf("dig E: %v", err)
-	}
-	if err := e.Refresh(); err != nil {
-		t.Fatalf("first Refresh: %v", err)
-	}
-	snap1 := map[string][2]int{}
-	for id, r := range e.data.Rooms {
-		snap1[id] = [2]int{r.X, r.Y}
-	}
-	if err := e.Refresh(); err != nil {
-		t.Fatalf("second Refresh: %v", err)
-	}
-	for id, want := range snap1 {
-		r := e.data.Rooms[id]
-		if got := [2]int{r.X, r.Y}; got != want {
-			t.Errorf("room %s coords drifted: got %v, want %v", id, got, want)
+	for id, r := range got.Rooms {
+		if r.X != 7 || r.Y != 11 {
+			t.Fatalf("room %s discovery coordinates changed: %+v", id, r)
 		}
 	}
-}
-
-// TestRefreshUndoableRestoresCoords asserts that Refresh pushes a pre-solve
-// snapshot onto the undo stack so /map undo restores hand-placed coords.
-func TestRefreshUndoableRestoresCoords(t *testing.T) {
-	e := NewEngine("")
-	if err := e.Create(""); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	if err := e.Dig(North, "B"); err != nil {
-		t.Fatalf("dig N: %v", err)
-	}
-	if err := e.Dig(East, "C"); err != nil {
-		t.Fatalf("dig E: %v", err)
-	}
-
-	// Hand-place rooms at intentionally tangled coords the solver will move.
-	pre := map[string][2]int{}
-	for id, r := range e.data.Rooms {
-		r.X, r.Y = 7, 11 // collide all rooms; solver must rearrange
-		pre[id] = [2]int{r.X, r.Y}
-	}
-
-	if err := e.Refresh(); err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-
-	moved := false
-	for id, r := range e.data.Rooms {
-		if [2]int{r.X, r.Y} != pre[id] {
-			moved = true
-			break
-		}
-	}
-	if !moved {
-		t.Fatal("setup invalid: solver did not move any rooms")
-	}
-
-	if err := e.Undo(); err != nil {
-		t.Fatalf("Undo after Refresh: %v", err)
-	}
-	for id, want := range pre {
-		r := e.data.Rooms[id]
-		if got := [2]int{r.X, r.Y}; got != want {
-			t.Errorf("room %s coords after undo: got %v, want %v (Refresh did not snapshot)", id, got, want)
-		}
-	}
-}
-
-func TestRefreshCommandMatchesFreshLoad(t *testing.T) {
-	buildTangled := func() *Map {
-		return &Map{
-			Rooms: map[string]*Room{
-				"A": {ID: "A", Name: "A", Exits: map[Direction]string{South: "B", East: "C"}, X: 0, Y: 0},
-				"B": {ID: "B", Name: "B", Exits: map[Direction]string{North: "A", NorthWest: "C"}, X: 0, Y: -1},
-				"C": {ID: "C", Name: "C", Exits: map[Direction]string{SouthEast: "B", West: "A"}, X: -1, Y: 0},
-			},
-			CurrentRoom: "A",
-		}
-	}
-
-	e1 := NewEngine("")
-	e1.data = buildTangled()
-	e1.data.LayoutVersion = CurrentLayoutVersion
-	if err := e1.Refresh(); err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "fixture.map")
-	raw, err := json.Marshal(buildTangled())
-	if err != nil {
-		t.Fatalf("marshal fixture: %v", err)
-	}
-	if err := os.WriteFile(path, raw, 0644); err != nil {
-		t.Fatalf("seed write: %v", err)
-	}
-	e2 := NewEngine("")
-	if err := e2.Create(path); err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	for _, id := range []string{"A", "B", "C"} {
-		a := e1.data.Rooms[id]
-		b := e2.data.Rooms[id]
-		if a.X != b.X || a.Y != b.Y {
-			t.Errorf("room %s: Refresh path = (%d,%d); Create migration path = (%d,%d)",
-				id, a.X, a.Y, b.X, b.Y)
-		}
+	if len(e.undo) != 0 {
+		t.Fatal("loading a map created an undo entry")
 	}
 }
 

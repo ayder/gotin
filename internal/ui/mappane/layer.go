@@ -25,82 +25,78 @@ func sameLayer(m *mapper.Map, a, b string) bool {
 	return false
 }
 
-// LayerOf returns the set of room IDs reachable from start using only the
-// eight cardinal/diagonal exits. Up/Down/In/Out are NOT traversed. Returns
-// an empty (non-nil) map when m is nil or start is missing.
-func LayerOf(m *mapper.Map, start string) map[string]struct{} {
-	out := map[string]struct{}{}
+// layerMembership groups weakly connected compass components. A one-way
+// passage is visible from either endpoint without inventing a reverse exit.
+// Up/down and named portals never join planar layers.
+func layerMembership(m *mapper.Map) map[string]string {
+	membership := map[string]string{}
 	if m == nil {
-		return out
+		return membership
 	}
-	if _, ok := m.Rooms[start]; !ok {
-		return out
-	}
-	queue := []string{start}
-	out[start] = struct{}{}
-	for len(queue) > 0 {
-		id := queue[0]
-		queue = queue[1:]
-		r, ok := m.Rooms[id]
-		if !ok {
+	adjacency := map[string][]string{}
+	var ids []string
+	for id, r := range m.Rooms {
+		if r == nil {
 			continue
 		}
+		ids = append(ids, id)
 		for _, d := range cardinalDirs {
-			next, has := r.Exits[d]
-			if !has {
+			to, ok := r.Exits[d]
+			if !ok || m.Rooms[to] == nil {
 				continue
 			}
-			if _, seen := out[next]; seen {
-				continue
+			adjacency[id] = append(adjacency[id], to)
+			adjacency[to] = append(adjacency[to], id)
+		}
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if _, seen := membership[id]; seen {
+			continue
+		}
+		membership[id] = id
+		queue := []string{id}
+		for len(queue) > 0 {
+			at := queue[0]
+			queue = queue[1:]
+			for _, to := range adjacency[at] {
+				if _, seen := membership[to]; seen {
+					continue
+				}
+				membership[to] = id
+				queue = append(queue, to)
 			}
-			if _, exists := m.Rooms[next]; !exists {
-				continue
-			}
-			out[next] = struct{}{}
-			queue = append(queue, next)
+		}
+	}
+	return membership
+}
+
+func LayerOf(m *mapper.Map, start string) map[string]struct{} {
+	out := map[string]struct{}{}
+	membership := layerMembership(m)
+	layer, ok := membership[start]
+	if !ok {
+		return out
+	}
+	for id, key := range membership {
+		if key == layer {
+			out[id] = struct{}{}
 		}
 	}
 	return out
 }
 
-// AllLayers returns one representative room ID per distinct connected
-// component (under cardinal+diagonal exits). The representative is the
-// alphabetically smallest room ID in the component, and the returned slice
-// is sorted ascending so output is deterministic across calls. Used by
-// '[' / ']' navigation in the UI.
 func AllLayers(m *mapper.Map) []string {
-	if m == nil || len(m.Rooms) == 0 {
-		return nil
-	}
-	seen := map[string]struct{}{}
-	var reps []string
-	// Iterate rooms in sorted order so each new component's smallest ID is
-	// the one we discover first.
-	ids := make([]string, 0, len(m.Rooms))
-	for id := range m.Rooms {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		if _, done := seen[id]; done {
-			continue
+	seen := map[string]bool{}
+	var layers []string
+	for _, layer := range layerMembership(m) {
+		if !seen[layer] {
+			seen[layer] = true
+			layers = append(layers, layer)
 		}
-		layer := LayerOf(m, id)
-		if len(layer) == 0 {
-			continue
-		}
-		// Find the smallest ID in this layer; that is the rep.
-		rep := id
-		for lid := range layer {
-			if lid < rep {
-				rep = lid
-			}
-			seen[lid] = struct{}{}
-		}
-		reps = append(reps, rep)
 	}
-	sort.Strings(reps)
-	return reps
+	sort.Strings(layers)
+	return layers
 }
 
 // placeholderName returns true for names that should not vote in the

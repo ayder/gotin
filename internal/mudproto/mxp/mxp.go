@@ -29,13 +29,14 @@ import (
 
 	"github.com/ayder/gotin/internal/mudproto/protolog"
 	"github.com/ayder/gotin/internal/network"
+	"github.com/ayder/gotin/internal/version"
 )
 
 // ClientName and ClientVersion appear in the <VERSION …> response sent to
 // the server on a bare <VERSION> probe.
 const (
 	ClientName    = "gotin"
-	ClientVersion = "0.1"
+	ClientVersion = version.Version
 	MXPVersion    = "0.4"
 )
 

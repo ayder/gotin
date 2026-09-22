@@ -1,6 +1,10 @@
 package mappane
 
 import (
+	"context"
+	"github.com/charmbracelet/x/ansi"
+	"nelib"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -67,361 +71,134 @@ func TestRender_PaneTooShort(t *testing.T) {
 	}
 }
 
-func TestRender_PanOffsetMovesRoomsAndClipsCurrent(t *testing.T) {
-	a := makeRoom("a", 0, 0, 0)
-	a.Name = "A"
-	m := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{"a": a}}
-	w, h := 18, 9
-	got := Render(View{
-		PaneWidth: w, PaneHeight: h, Map: m, CurrentID: "a",
-		PanOffset: Point{Col: 100, Row: 0}, // pans far past current → clipped
-	})
-	if strings.ContainsRune(got, glyphCurrentRoom) {
-		t.Errorf("current room must be clipped at this pan offset:\n%s", got)
+func drawnView(t *testing.T, m *mapper.Map, current, remote string) View {
+	t.Helper()
+	a := &Adapter{}
+	req, err := a.Prepare(m, current, remote)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.ContainsRune(got, '*') {
-		t.Errorf("expected * indicator when current is clipped:\n%s", got)
+	frame, err := Draw(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
 	}
+	return View{Map: m, CurrentID: current, LayerKey: remote, Frame: frame, PaneWidth: 80, PaneHeight: 24}
 }
 
-func TestRender_TwoLayers_DefaultShowsCurrent(t *testing.T) {
-	a := makeRoom("a", 0, 0, 0)
-	a.Name = "Square"
-	b := makeRoom("b", 0, 0, 1)
-	b.Name = "Loft"
-	a.Exits[mapper.Up] = "b"
-	b.Exits[mapper.Down] = "a"
-	m := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{"a": a, "b": b}}
-	got := Render(View{PaneWidth: 30, PaneHeight: 7, Map: m, CurrentID: "a"})
-	lines := strings.Split(got, "\n")
-	if !strings.HasPrefix(strings.TrimRight(lines[0], " "), "Square") {
-		t.Errorf("expected layer label to start with Square, got %q", lines[0])
+func TestNelibDrawingIgnoresDiscoveryCoordinates(t *testing.T) {
+	m := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{
+		"a": {ID: "a", Name: "Square", X: 7, Y: 11, Exits: map[mapper.Direction]string{mapper.South: "b", mapper.West: "c"}},
+		"b": {ID: "b", X: 7, Y: 11, Exits: map[mapper.Direction]string{mapper.North: "a", mapper.NorthWest: "c"}},
+		"c": {ID: "c", X: 7, Y: 11, Exits: map[mapper.Direction]string{mapper.SouthEast: "b", mapper.East: "a"}},
+	}}
+	v := drawnView(t, m, "a", "")
+	if _, _, err := nelib.ParseDrawing(v.Frame.Drawing.Text); err != nil {
+		t.Fatal(err)
 	}
-	// Layer "b" (Loft) must NOT appear in header or body.
-	for i, l := range lines {
-		if i == len(lines)-1 {
-			continue // footer may legitimately show bridge names
-		}
-		if strings.Contains(l, "Loft") {
-			t.Errorf("Loft must not appear when rendering layer A (line %d):\n%s", i, got)
+	for id, r := range m.Rooms {
+		if r.X != 7 || r.Y != 11 {
+			t.Fatalf("changed discovery coordinates for %s", id)
 		}
 	}
-}
-
-func TestRender_TwoLayers_LayerKeyOverridesAndAddsViewingRemote(t *testing.T) {
-	a := makeRoom("a", 0, 0, 0)
-	a.Name = "Square"
-	b := makeRoom("b", 0, 0, 1)
-	b.Name = "Loft"
-	a.Exits[mapper.Up] = "b"
-	b.Exits[mapper.Down] = "a"
-	m := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{"a": a, "b": b}}
-	got := Render(View{PaneWidth: 36, PaneHeight: 7, Map: m, CurrentID: "a", LayerKey: "b"})
-	lines := strings.Split(got, "\n")
-	want := "Loft [Z=1] (viewing remote)"
-	if strings.TrimRight(lines[0], " ") != want {
-		t.Errorf("layer header = %q, want %q", lines[0], want)
+	out := Render(v)
+	if !strings.Contains(out, "●") || !strings.Contains(out, "╲") || !strings.Contains(out, "│") || !strings.Contains(out, "─") {
+		t.Fatalf("missing map geometry:\n%s", out)
 	}
-	// Should now show layer B's room glyph and not A's.
-	if !strings.ContainsRune(got, glyphRoom) && !strings.ContainsRune(got, glyphCurrentRoom) {
-		t.Errorf("expected at least one room glyph for remote layer:\n%s", got)
-	}
-}
-
-func TestFooter_NoBridges(t *testing.T) {
-	a := makeRoom("a", 0, 0, 0)
-	a.Name = "A"
-	m := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{"a": a}}
-	got := Render(View{PaneWidth: 30, PaneHeight: 6, Map: m, CurrentID: "a"})
-	lines := strings.Split(got, "\n")
-	if lines[len(lines)-1] != padLine("dig: u/d/in/out", 30) {
-		t.Errorf("footer mismatch: %q", lines[len(lines)-1])
-	}
-}
-
-func TestFooter_ExistingBridgesAndPartialDigHints(t *testing.T) {
-	a := makeRoom("a", 0, 0, 0)
-	a.Name = "A"
-	b := makeRoom("b", 0, 0, 1)
-	b.Name = "Stairs"
-	a.Exits[mapper.Up] = "b"
-	b.Exits[mapper.Down] = "a"
-	m := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{"a": a, "b": b}}
-	got := Render(View{PaneWidth: 40, PaneHeight: 6, Map: m, CurrentID: "a"})
-	lines := strings.Split(got, "\n")
-	want := padLine("↑ Stairs | dig: d/in/out", 40)
-	if lines[len(lines)-1] != want {
-		t.Errorf("footer mismatch:\nGOT:  %q\nWANT: %q", lines[len(lines)-1], want)
-	}
-}
-
-func TestFooter_AllFourBridgesNoDigHint(t *testing.T) {
-	a := makeRoom("a", 0, 0, 0)
-	a.Exits = map[mapper.Direction]string{
-		mapper.Up: "u", mapper.Down: "d", mapper.In: "i", mapper.Out: "o",
-	}
-	rooms := map[string]*mapper.Room{
-		"a": a,
-		"u": {ID: "u", Name: "UpRoom", Exits: map[mapper.Direction]string{mapper.Down: "a"}},
-		"d": {ID: "d", Name: "DnRoom", Exits: map[mapper.Direction]string{mapper.Up: "a"}},
-		"i": {ID: "i", Name: "InRoom", Exits: map[mapper.Direction]string{mapper.Out: "a"}},
-		"o": {ID: "o", Name: "OutRoom", Exits: map[mapper.Direction]string{mapper.In: "a"}},
-	}
-	m := &mapper.Map{CurrentRoom: "a", Rooms: rooms}
-	got := Render(View{PaneWidth: 60, PaneHeight: 6, Map: m, CurrentID: "a"})
-	lines := strings.Split(got, "\n")
-	want := padLine("↑ UpRoom | ↓ DnRoom | ▶ InRoom | ◀ OutRoom", 60)
-	if lines[len(lines)-1] != want {
-		t.Errorf("footer mismatch:\nGOT:  %q\nWANT: %q", lines[len(lines)-1], want)
-	}
-}
-
-func TestRender_BridgeOverlay_CardinalWinsOverArrow(t *testing.T) {
-	a := makeRoom("a", 0, 0, 0)
-	a.Name = "A"
-	b := makeRoom("b", 0, 1, 0)
-	b.Name = "B"
-	c := makeRoom("c", 0, 0, 1)
-	c.Name = "C"
-	a.Exits[mapper.North] = "b"
-	b.Exits[mapper.South] = "a"
-	a.Exits[mapper.Up] = "c"
-	c.Exits[mapper.Down] = "a"
-	m := &mapper.Map{
-		CurrentRoom: "a",
-		Rooms:       map[string]*mapper.Room{"a": a, "b": b, "c": c},
-	}
-	got := Render(View{PaneWidth: 18, PaneHeight: 9, Map: m, CurrentID: "a"})
-	lines := strings.Split(got, "\n")
-	// Find current row.
-	var curRow int
-	for i, l := range lines {
-		if strings.ContainsRune(l, glyphCurrentRoom) {
-			curRow = i
-			break
+	for _, line := range strings.Split(out, "\n") {
+		if ansi.StringWidth(line) != v.PaneWidth {
+			t.Fatalf("wrong width: %q", line)
 		}
 	}
-	above := lines[curRow-1]
-	if !strings.ContainsRune(above, glyphVLink) {
-		t.Errorf("expected │ on row above current room, got %q", above)
-	}
-	if strings.ContainsRune(above, '↑') {
-		t.Errorf("↑ must NOT appear when │ already occupies the gutter, got %q", above)
+	v.PanOffset = Point{Col: 1000}
+	out = Render(v)
+	if strings.Contains(out, "●") || !strings.Contains(out, "*") {
+		t.Fatalf("pan/clipped marker:\n%s", out)
 	}
 }
 
-func TestRender_BridgeOverlay_DownAndIn(t *testing.T) {
-	a := makeRoom("a", 0, 0, 0)
-	b := makeRoom("b", 0, 0, -1)
-	c := makeRoom("c", 0, 0, 0)
-	a.Exits[mapper.Down] = "b"
-	b.Exits[mapper.Up] = "a"
-	a.Exits[mapper.In] = "c"
-	c.Exits[mapper.Out] = "a"
-	m := &mapper.Map{
-		CurrentRoom: "a",
-		Rooms:       map[string]*mapper.Room{"a": a, "b": b, "c": c},
+func TestRemoteLayerAndBridgeFooter(t *testing.T) {
+	m := &mapper.Map{CurrentRoom: "a", Rooms: map[string]*mapper.Room{
+		"a": {ID: "a", Name: "Square", Exits: map[mapper.Direction]string{mapper.Up: "b", mapper.In: "c"}},
+		"b": {ID: "b", Name: "Loft", Z: 1, Exits: map[mapper.Direction]string{}},
+		"c": {ID: "c", Name: "Shop", Exits: map[mapper.Direction]string{mapper.Out: "a"}},
+	}}
+	current := drawnView(t, m, "a", "")
+	out := Render(current)
+	if !strings.Contains(current.Frame.Drawing.Text, "↑") || !strings.Contains(out, "↑ Loft") || !strings.Contains(out, "▶ Shop") {
+		t.Fatalf("missing bridges:\n%s", out)
 	}
-	got := Render(View{PaneWidth: 18, PaneHeight: 9, Map: m, CurrentID: "a"})
-	if !strings.ContainsRune(got, '↓') {
-		t.Errorf("expected ↓ overlay below current room:\n%s", got)
+	remote := drawnView(t, m, "a", "b")
+	out = Render(remote)
+	if !strings.Contains(out, "Loft [Z=1] (viewing remote)") || strings.Contains(out, "●") {
+		t.Fatalf("remote marker/header:\n%s", out)
 	}
-	if !strings.ContainsRune(got, '▶') {
-		t.Errorf("expected ▶ overlay east of current room:\n%s", got)
-	}
-}
-
-func TestRender_CoordOverlapNudgesAndFlags(t *testing.T) {
-	// a and b both live at (0,0). They share a layer because b lists a as
-	// its east neighbour even though the coordinates do not match — that
-	// link is omitted by the connectivity rule, but LayerOf still treats
-	// them as connected because BFS trusts the exit map.
-	a := makeRoom("a", 0, 0, 0)
-	a.Name = "A"
-	b := makeRoom("b", 0, 0, 0)
-	b.Name = "B"
-	a.Exits[mapper.West] = "b"
-	b.Exits[mapper.East] = "a"
-	m := &mapper.Map{
-		CurrentRoom: "a",
-		Rooms:       map[string]*mapper.Room{"a": a, "b": b},
-	}
-	got := Render(View{PaneWidth: 22, PaneHeight: 9, Map: m, CurrentID: "a"})
-	if !strings.ContainsRune(got, '!') {
-		t.Errorf("expected ! overlap flag in render:\n%s", got)
-	}
-	if strings.Count(got, string(glyphRoom)) < 1 {
-		t.Errorf("expected at least one normal room glyph in render:\n%s", got)
+	if len(remote.Frame.Drawing.Positions) != 1 {
+		t.Fatal("other layer leaked into view")
 	}
 }
 
-func TestRender_DrawsEdgeWhenCoordsDoNotMatch(t *testing.T) {
-	// A says exits[E]=B, and B's X is 5. Settled-grid layouts may produce
-	// non-step-adjacent cells, so the link should still be drawn.
-	a := makeRoom("a", 0, 0, 0)
-	b := makeRoom("b", 5, 0, 0)
-	a.Exits[mapper.East] = "b"
-	b.Exits[mapper.West] = "a"
-	m := &mapper.Map{
-		CurrentRoom: "a",
-		Rooms:       map[string]*mapper.Room{"a": a, "b": b},
+func TestOneWayLinkVisibleFromDestination(t *testing.T) {
+	m := &mapper.Map{CurrentRoom: "b", Rooms: map[string]*mapper.Room{
+		"a": {ID: "a", Exits: map[mapper.Direction]string{mapper.East: "b"}},
+		"b": {ID: "b", Exits: map[mapper.Direction]string{}},
+	}}
+	v := drawnView(t, m, "b", "")
+	if !strings.Contains(v.Frame.Drawing.Text, "→") || len(v.Frame.Drawing.Positions) != 2 {
+		t.Fatalf("one-way passage missing: %s", v.Frame.Drawing.Text)
 	}
-	got := Render(View{PaneWidth: 30, PaneHeight: 9, Map: m, CurrentID: "a"})
-	if !strings.ContainsRune(got, glyphHLink) {
-		t.Errorf("expected ─ when destination coord does not match offset:\n%s", got)
+	if len(m.Rooms["b"].Exits) != 0 {
+		t.Fatal("adapter invented reverse exit")
 	}
-}
-
-func TestLongDiagonalEdge(t *testing.T) {
-	m := &mapper.Map{
-		Rooms: map[string]*mapper.Room{
-			"A": {ID: "A", Name: "A", X: 0, Y: 0, Exits: map[mapper.Direction]string{mapper.South: "B", mapper.East: "C"}},
-			"B": {ID: "B", Name: "B", X: 0, Y: -2, Exits: map[mapper.Direction]string{mapper.North: "A", mapper.NorthEast: "C"}},
-			"C": {ID: "C", Name: "C", X: 2, Y: 0, Exits: map[mapper.Direction]string{mapper.West: "A", mapper.SouthWest: "B"}},
-		},
-		CurrentRoom: "A",
-	}
-	lines := bodyLines(View{Map: m, CurrentID: "A", PaneWidth: 40}, 20)
-	out := strings.Join(lines, "\n")
-	if !strings.ContainsRune(out, glyphVLink) {
-		t.Errorf("missing vertical link glyph (A-B):\n%s", out)
-	}
-	if !strings.ContainsRune(out, glyphHLink) {
-		t.Errorf("missing horizontal link glyph (A-C):\n%s", out)
-	}
-	if !strings.ContainsRune(out, glyphDiagNESW) && !strings.ContainsRune(out, glyphDiagNWSE) {
-		t.Errorf("missing diagonal link glyph (B-C):\n%s", out)
+	if len(AllLayers(m)) != 1 {
+		t.Fatal("one-way connection split into separate layers")
 	}
 }
 
-func TestRender_NorthEastDiagonalLink(t *testing.T) {
-	a := makeRoom("a", 0, 0, 0)
-	b := makeRoom("b", 1, 1, 0)
-	a.Exits[mapper.NorthEast] = "b"
-	b.Exits[mapper.SouthWest] = "a"
-	m := &mapper.Map{
-		CurrentRoom: "a",
-		Rooms:       map[string]*mapper.Room{"a": a, "b": b},
+func TestAdapterStableLabelsAndCacheKey(t *testing.T) {
+	m := &mapper.Map{CurrentRoom: "z", Rooms: map[string]*mapper.Room{"z": {ID: "z", Name: "First", Exits: map[mapper.Direction]string{}}}}
+	a := &Adapter{}
+	first, err := a.Prepare(m, "z", "")
+	if err != nil {
+		t.Fatal(err)
 	}
-	got := Render(View{PaneWidth: 14, PaneHeight: 9, Map: m, CurrentID: "a"})
-	if !strings.ContainsRune(got, glyphDiagNESW) {
-		t.Errorf("expected ╱ in render output:\n%s", got)
+	m.Rooms["z"].Name = "Renamed"
+	m.Rooms["z"].X = 500
+	same, _ := a.Prepare(m, "z", "")
+	if first.Key != same.Key {
+		t.Fatal("metadata/recognition coordinates invalidated drawing")
 	}
-}
-
-func TestRender_MixedGridAllEightNeighbours(t *testing.T) {
-	// 3x3 grid centred on "c" with all eight neighbours.
-	rooms := map[string]*mapper.Room{}
-	put := func(id string, x, y int) { rooms[id] = makeRoom(id, x, y, 0) }
-	put("nw", -1, 1)
-	put("n", 0, 1)
-	put("ne", 1, 1)
-	put("w", -1, 0)
-	put("c", 0, 0)
-	put("e", 1, 0)
-	put("sw", -1, -1)
-	put("s", 0, -1)
-	put("se", 1, -1)
-	c := rooms["c"]
-	c.Exits = map[mapper.Direction]string{
-		mapper.North: "n", mapper.South: "s", mapper.East: "e", mapper.West: "w",
-		mapper.NorthEast: "ne", mapper.NorthWest: "nw",
-		mapper.SouthEast: "se", mapper.SouthWest: "sw",
+	m.Rooms["a"] = &mapper.Room{ID: "a", Exits: map[mapper.Direction]string{}}
+	added, _ := a.Prepare(m, "z", "")
+	if first.Scene.Rooms["z"].Label != added.Scene.Rooms["z"].Label {
+		t.Fatal("existing room renumbered")
 	}
-	for id, r := range rooms {
-		if id == "c" {
-			continue
-		}
-		// Reverse links so the layer BFS sees them.
-		for d, dest := range c.Exits {
-			if dest == id {
-				r.Exits[mapper.ReverseDirection(d)] = "c"
-			}
-		}
+	if reflect.DeepEqual(added.Key, first.Key) {
+		t.Fatal("graph change did not invalidate drawing")
 	}
-	m := &mapper.Map{CurrentRoom: "c", Rooms: rooms}
-	got := Render(View{PaneWidth: 18, PaneHeight: 11, Map: m, CurrentID: "c"})
-	for _, want := range []rune{glyphHLink, glyphVLink, glyphDiagNESW, glyphDiagNWSE, glyphCurrentRoom} {
-		if !strings.ContainsRune(got, want) {
-			t.Errorf("missing rune %q in render:\n%s", want, got)
-		}
-	}
-	if strings.Count(got, string(glyphCurrentRoom)) != 1 {
-		t.Error("expected exactly one current-room glyph")
-	}
-	if strings.Count(got, string(glyphRoom)) != 8 {
-		t.Errorf("expected 8 normal rooms, got %d:\n%s", strings.Count(got, string(glyphRoom)), got)
+	m.Rooms["z"].Exits[mapper.North] = "a"
+	if len(first.Scene.Rooms["z"].Exits) != 0 {
+		t.Fatal("request aliases caller maps")
 	}
 }
 
-func TestRender_TwoRoomsLinkedEast(t *testing.T) {
-	a := makeRoom("a", 0, 0, 0)
-	b := makeRoom("b", 1, 0, 0)
-	a.Name, b.Name = "A", "B"
-	a.Exits[mapper.East] = "b"
-	b.Exits[mapper.West] = "a"
-	m := &mapper.Map{
-		CurrentRoom: "a",
-		Rooms:       map[string]*mapper.Room{"a": a, "b": b},
+func TestFailureAndPendingDoNotRenderOldGeometry(t *testing.T) {
+	m := &mapper.Map{Rooms: map[string]*mapper.Room{"a": {ID: "a", Exits: map[mapper.Direction]string{}}}}
+	v := drawnView(t, m, "a", "")
+	v.Error = nelib.ErrImpossible
+	out := Render(v)
+	if !strings.Contains(out, "conflicting exits") || !strings.Contains(out, "Discovered rooms are retained") || strings.Contains(out, "●") {
+		t.Fatalf("error state: %s", out)
 	}
-	got := Render(View{PaneWidth: 14, PaneHeight: 7, Map: m, CurrentID: "a"})
-	if !strings.Contains(got, "▣─■") {
-		t.Errorf("expected ▣─■ in body, got:\n%s", got)
-	}
-}
-
-func TestRender_TwoRoomsLinkedNorth(t *testing.T) {
-	a := makeRoom("a", 0, 0, 0)
-	b := makeRoom("b", 0, 1, 0)
-	a.Exits[mapper.North] = "b"
-	b.Exits[mapper.South] = "a"
-	m := &mapper.Map{
-		CurrentRoom: "a",
-		Rooms:       map[string]*mapper.Room{"a": a, "b": b},
-	}
-	got := Render(View{PaneWidth: 14, PaneHeight: 9, Map: m, CurrentID: "a"})
-	// Vertical link is in the row above the current room glyph.
-	lines := strings.Split(got, "\n")
-	bodyStart := 2
-	// Find current room row to make assertion robust to centering math.
-	var curRow int
-	for i := bodyStart; i < len(lines); i++ {
-		if strings.ContainsRune(lines[i], glyphCurrentRoom) {
-			curRow = i
-			break
-		}
-	}
-	if curRow == 0 || curRow-1 < bodyStart {
-		t.Fatalf("could not locate current-room row in:\n%s", got)
-	}
-	if !strings.ContainsRune(lines[curRow-1], glyphVLink) {
-		t.Errorf("expected │ on row above current room, got %q", lines[curRow-1])
+	v.Error = nil
+	v.Pending = true
+	out = Render(v)
+	if !strings.Contains(out, "Drawing map") || strings.Contains(out, "●") {
+		t.Fatal("pending state displayed stale geometry")
 	}
 }
 
-func TestRender_SingleRoomCentered(t *testing.T) {
-	a := makeRoom("a", 0, 0, 0)
-	a.Name = "Town Square"
-	m := &mapper.Map{
-		CurrentRoom: "a",
-		Rooms:       map[string]*mapper.Room{"a": a},
-	}
-	w, h := 12, 7
-	got := Render(View{PaneWidth: w, PaneHeight: h, Map: m, CurrentID: "a"})
-	lines := strings.Split(got, "\n")
-	if len(lines) != h {
-		t.Fatalf("expected %d lines, got %d", h, len(lines))
-	}
-	if lines[0] != padLine("Town Square", w) {
-		t.Errorf("header[0] = %q", lines[0])
-	}
-	if lines[1] != padLine("Town Square", w) {
-		t.Errorf("header[1] = %q", lines[1])
-	}
-	// Body rows are h - 3 = 4. Center body row = (4-1)/2 snapped to even = 2.
-	bodyTop := 2
-	wantCenterRow := bodyTop + 2 // bodyRows/2 = 2 → header offset 2 → row 4
-	if !strings.Contains(lines[wantCenterRow], "▣") {
-		t.Errorf("expected current-room glyph ▣ on line %d, got %q", wantCenterRow, lines[wantCenterRow])
+func TestHeaderUsesTerminalCellWidth(t *testing.T) {
+	if got := padRight("界界界", 5); ansi.StringWidth(got) != 5 {
+		t.Fatalf("wrong width: %q", got)
 	}
 }

@@ -1,6 +1,6 @@
 # Gotin Mapping System
 
-This document outlines the internal workings and user-facing features of the Gotin mapping system. Gotin uses a powerful hybrid mapping approach that allows for both manual graph construction and smart auto-mapping, visualizing the result directly in your terminal using [Mermaid](https://mermaid.js.org/) syntax.
+Gotin builds and stores the discovered room graph. `nelib` lays out and draws immutable snapshots in the terminal pane. Mermaid remains available as a separate graph export.
 
 ## 1. Overview
 
@@ -9,7 +9,8 @@ The mapping system is designed to keep track of where you are in the MUD, how ro
 ### Key Features
 - **In-Memory Graph**: Fast, bidirectional room traversal.
 - **Smart Auto-Mapping**: Hashes room descriptions to uniquely identify rooms, even if their names are identical (e.g., "A Dark Forest").
-- **Mermaid Visuals**: Leverages `go-mermaid` to generate flowchart representations of the map that can be rendered or exported easily.
+- **Terminal map**: `nelib` validates directions, spacing, and path intersections before displaying a drawing.
+- **Mermaid export**: `go-mermaid` generates a separate flowchart representation.
 - **JSON Persistence**: Maps are saved to disk as human-readable JSON files.
 
 ---
@@ -25,8 +26,8 @@ Each room is stored as an object containing:
 - **`Description`**: A snippet of the room's description used for identification.
 - **`DescriptionHash`**: A SHA-256 hash of the room's description and known exits. This is the core of the auto-mapping system, allowing the client to recognize when you've walked in a circle or returned to a previously visited room.
 - **`Exits`**: A map linking standard directions (n, s, e, w, u, d, etc.) to the `ID`s of other rooms.
-- **`X, Y, Z`**: Logical settled-grid coordinates. The mapper stores integer cells; the terminal renderer applies its own screen-cell multiplier.
-- **`LayoutVersion`**: A small integer on the `Map` that tracks which layout solver produced the stored coordinates. Loading a stale map re-runs the solver once and writes the current version on the next save.
+- **`X, Y, Z`**: Discovery coordinates used for placement and proximity matching. They are independent of nelib terminal coordinates.
+- **`LayoutVersion`**: Retained for compatibility with existing map files. Loading a map preserves its stored coordinates; there is no display-layout migration.
 
 ### The JSON File
 When you run `/map exit` or the game triggers an auto-save, the engine serializes the `Map` object (which contains the `Rooms` dictionary and the `CurrentRoom` ID) to a JSON file (e.g., `map.json`).
@@ -90,7 +91,12 @@ If you prefer building the map node-by-node, or need to fix auto-mapping errors:
 
 - `/map show`
   Toggles the live, terminal-native map pane to the right of the MUD output.
-  Cell pitch (2,2). Layer auto-switches on up/down/in/out.
+  Rooms use numeric display labels and `●` marks the current room. These numbers
+  are stable during the UI session; commands still address stored IDs or names.
+  Planar layers are compass-connected components, including incoming one-way
+  links. Up/down/in/out do not join layers. Remote views do not move the player.
+  Up/down indicators appear in room labels; the footer lists current-room
+  up/down/in/out destinations. One-way compass paths use arrowheads.
   Keybindings (active while pane is visible):
   - `shift+←/→/↑/↓` — pan (works even while typing)
   - `F5` — recenter and clear remote-layer view
@@ -100,7 +106,16 @@ If you prefer building the map node-by-node, or need to fix auto-mapping errors:
   - `/map show` or `ctrl+b` — toggle pane on/off
 
 - `/map refresh`
-  Re-runs the settled-grid layout solver across the map and replaces stored coordinates with settled positions. Use it when a MUD's topology is not strictly Euclidean, such as closing triangles like `s -> nw -> e`. Also bound to `ctrl-r` while the map pane is visible.
+  Invalidates the cached drawing and requests a fresh background solve. Also
+  bound to `ctrl-r` while the pane is visible. It never changes discovery
+  coordinates or adds an undo entry. If the pane is closed, the next open solves.
+
+  The current integration gives the solver two seconds, with a 30 ms optional
+  layout optimization budget, a 2.5-second caller deadline, and a 200,000-cell
+  drawing limit. New requests cancel obsolete work; stale results are discarded.
+  Panning and resizing only crop the completed drawing. A timeout or impossible
+  layout displays an error while Gotin continues recording rooms and movement.
+  The pane never substitutes misleading geometry for an unsatisfied layout.
 
 - `/map mermaid [radius|all]`
   Generates the Mermaid graph.

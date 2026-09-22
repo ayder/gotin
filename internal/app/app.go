@@ -896,11 +896,8 @@ func (s *Session) dispatch(cmd command.Command) (mutates, quit bool) {
 		return false, false
 
 	case *command.MapRefresh:
-		if err := s.mapEngine.Refresh(); err != nil {
-			s.program.Send(ui.StatusMsg{Message: fmt.Sprintf("[Map] Refresh error: %v\n", err)})
-		} else {
-			s.program.Send(ui.StatusMsg{Message: "[Map] Layout refreshed.\n"})
-		}
+		s.program.Send(ui.MapPaneRefreshMsg{})
+		s.program.Send(ui.StatusMsg{Message: "[Map] Redrawing map.\n"})
 		return false, false
 
 	case *command.MapInfo:

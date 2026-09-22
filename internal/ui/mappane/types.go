@@ -15,5 +15,8 @@ type View struct {
 	Map        *mapper.Map // map snapshot; may be nil
 	CurrentID  string      // current room ID; "" or missing → fallback render
 	PanOffset  Point       // pan in screen cells from current-room-centred default
-	LayerKey   string      // representative room ID of layer to render; "" = layer of CurrentID
+	Frame      *Frame      // Completed nelib drawing; never computed by Render.
+	Pending    bool
+	Error      error
+	LayerKey   string // representative room ID of layer to render; "" = layer of CurrentID
 }
