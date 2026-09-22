@@ -5,7 +5,7 @@ import (
 	"errors"
 	"strings"
 
-	"nelib"
+	"github.com/ayder/nelib"
 )
 
 // bodyLines only crops a completed drawing. It never solves, starts a worker,

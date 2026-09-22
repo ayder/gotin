@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/ayder/gotin/internal/mapper"
-	"nelib"
+	"github.com/ayder/nelib"
 )
 
 // Adapter owns only session-local display labels. UUIDs/vnums, discovery

@@ -2,13 +2,13 @@ package mappane
 
 import (
 	"context"
-	"github.com/charmbracelet/x/ansi"
-	"nelib"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/ayder/gotin/internal/mapper"
+	"github.com/ayder/nelib"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // padLine right-pads or truncates s so it matches the requested width. Render

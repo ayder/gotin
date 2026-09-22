@@ -4,16 +4,14 @@ go 1.25.5
 
 require (
 	github.com/TyphonHill/go-mermaid v1.0.0
+	github.com/ayder/nelib v0.0.0-20260922070606-7628807da8fc
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/charmbracelet/x/ansi v0.10.1
 	github.com/google/uuid v1.6.0
 	golang.org/x/text v0.33.0
-	nelib v0.0.0
 )
-
-replace nelib => ../nelib
 
 require (
 	github.com/atotto/clipboard v0.1.4 // indirect

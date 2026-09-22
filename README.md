@@ -15,9 +15,8 @@
 
 ### Prerequisites
 -   Go 1.25.5 or higher.
--   A sibling `../nelib` checkout containing the `DrawScene` API. The current
-    `go.mod` uses `replace nelib => ../nelib`; no GitHub publication is needed
-    for local development. Both directories are required to build or test.
+-   Go downloads the pinned [`nelib`](https://github.com/ayder/nelib) module
+    automatically; no sibling checkout is required.
 
 ### Build from Source
 ```bash
