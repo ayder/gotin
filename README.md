@@ -13,14 +13,26 @@
 
 ## Installation
 
-### Prerequisites
+### Download
+Prebuilt executables for Linux, macOS and Windows (amd64 and arm64) are attached
+to each [GitHub release](https://github.com/ayder/gotin/releases). Download the
+archive for your platform, extract it, and run `gotin` (`gotin.exe` on Windows).
+`SHA256SUMS.txt` lists the checksum of every archive.
+
+The binaries are not code-signed:
+-   **macOS:** Gatekeeper blocks the first launch. Clear the quarantine flag with
+    `xattr -d com.apple.quarantine ./gotin`.
+-   **Windows:** SmartScreen may warn; choose *More info → Run anyway*.
+
+### Build from Source
+
+Prerequisites:
 -   Go 1.25.5 or higher.
 -   Go downloads the pinned [`nelib`](https://github.com/ayder/nelib) module
     automatically; no sibling checkout is required.
 
-### Build from Source
 ```bash
-git clone https://github.com/yourusername/gotin.git
+git clone https://github.com/ayder/gotin.git
 cd gotin
 go build -o gotin ./cmd/gotin
 ```
