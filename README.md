@@ -169,4 +169,4 @@ Maps are saved to the file specified in `/map create`. `/save` and `/load` defau
 *Note: Patterns are Go Regular Expressions.*
 
 ## License
-MIT
+Licensed under the [Apache License 2.0](LICENSE).
