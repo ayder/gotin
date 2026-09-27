@@ -55,3 +55,6 @@ docs/.git/
 vendor/
 node_modules/
 .go-version
+
+# release artifacts
+dist/
